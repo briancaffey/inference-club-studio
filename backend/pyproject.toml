@@ -25,13 +25,14 @@ dependencies = [
     "pydub",
     "soundfile",
     "python-magic",
+    # HTTP client (used by InvokeAI client)
+    "httpx",
 ]
 
 [dependency-groups]
 dev = [
     "pytest",
     "pytest-asyncio",
-    "httpx",
     "black",
     "isort",
     "flake8",

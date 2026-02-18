@@ -1,0 +1,526 @@
+def generate_image_using_comfyui_worker(
+    gallery_directory: str,
+    comfyui_url: str,
+    prompt: str = None,
+    steps: int = 30,
+    workflow: str = COMFYUI_FLUX_KONTEXT_WORKFLOW,
+):
+    """Background worker function to process screenshot with ComfyUI Flux Kontext workflow"""
+    try:
+        logging.info(
+            f"Starting background image generation using ComfyUI from directory: {gallery_directory}"
+        )
+
+        # Ensure output directory exists
+        global OUTPUT_DIRECTORY
+        try:
+            os.makedirs(OUTPUT_DIRECTORY, exist_ok=True)
+            logging.info(f"Output directory: {OUTPUT_DIRECTORY}")
+        except (OSError, PermissionError) as e:
+            error_msg = f"Failed to create output directory '{OUTPUT_DIRECTORY}': {e}. Please check the path and permissions."
+            logging.error(error_msg)
+            return
+
+        # Use default prompt if none provided
+        if not prompt:
+            prompt = "make it in the style of studio ghibli anime"
+            logging.info(f"No prompt provided, using default: {prompt}")
+        else:
+            logging.info(f"Using provided prompt: {prompt}")
+
+        # Look for common screenshot file extensions
+        screenshot_extensions = {".png", ".jpg", ".jpeg", ".bmp", ".tiff"}
+
+        # Find the most recent screenshot recursively
+        latest_screenshot_path = find_most_recent_image(
+            gallery_directory, screenshot_extensions
+        )
+
+        if not latest_screenshot_path:
+            logging.error(
+                f"No screenshot files found in directory or subdirectories: {gallery_directory}"
+            )
+            return
+
+        logging.info(f"Using most recent screenshot: {latest_screenshot_path}")
+
+        # Step 1: Prepare the image (scale/crop to 1392x752 and save to temporary file)
+        resized_image_path = prepare_image_for_comfyui(latest_screenshot_path)
+
+        if not resized_image_path:
+            logging.error("Failed to prepare image for ComfyUI Flux Kontext")
+            return
+
+        logging.info("Successfully prepared image for ComfyUI Flux Kontext")
+
+        # Step 2: Upload the resized image to ComfyUI
+        image_name = upload_image_to_comfyui(resized_image_path, comfyui_url)
+
+        if not image_name:
+            logging.error("Failed to upload image to ComfyUI")
+            return
+
+        logging.info(f"Successfully uploaded image to ComfyUI with name: {image_name}")
+
+        # Step 3: Modify the workflow with the prompt, image name, and steps
+        modified_workflow = modify_comfyui_workflow_for_kontext(
+            COMFYUI_FLUX_KONTEXT_WORKFLOW, prompt, image_name, steps
+        )
+
+        if not modified_workflow:
+            logging.error("Failed to modify ComfyUI workflow")
+            return
+
+        # Step 4: Execute the workflow via ComfyUI API
+        logging.info("Executing ComfyUI workflow...")
+        output_images = execute_comfyui_workflow(modified_workflow, comfyui_url)
+
+        if output_images:
+            logging.info("Successfully executed ComfyUI Flux Kontext workflow")
+
+            # Save the output image
+            for node_id, images in output_images.items():
+                for i, image_data in enumerate(images):
+                    # Create output filename with timestamp
+                    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                    filename = f"comfyui_flux_kontext_{timestamp}_{i}.png"
+                    file_path = os.path.join(OUTPUT_DIRECTORY, filename)
+
+                    # Save the image
+                    with open(file_path, "wb") as f:
+                        f.write(image_data)
+
+                    logging.info(f"Image saved successfully: {file_path}")
+
+                    # Set the image as desktop background
+                    if set_desktop_background(file_path):
+                        logging.info(
+                            f"Successfully set {file_path} as desktop background"
+                        )
+                    else:
+                        logging.warning(
+                            f"Failed to set {file_path} as desktop background"
+                        )
+        else:
+            logging.error("Failed to execute ComfyUI workflow")
+
+    except requests.exceptions.ConnectionError as e:
+        logging.error(f"Could not connect to ComfyUI server at {comfyui_url}: {e}")
+    except requests.exceptions.Timeout:
+        logging.error("Request to ComfyUI server timed out after 5 minutes")
+    except requests.exceptions.HTTPError as e:
+        logging.error(
+            f"ComfyUI API request failed with status code {e.response.status_code}"
+        )
+        # Log the full error response to see what the server is complaining about
+        try:
+            error_response = e.response.json()
+            logging.error(
+                f"Error response from server: {json.dumps(error_response, indent=2)}"
+            )
+        except json.JSONDecodeError:
+            logging.error(f"Error response text: {e.response.text}")
+        logging.error(f"Request URL: {e.request.url}")
+        logging.error(f"Request headers: {dict(e.request.headers)}")
+    except json.JSONDecodeError as e:
+        logging.error(f"Error parsing ComfyUI response: {e}")
+    except Exception as e:
+        logging.error(f"Unexpected error during ComfyUI generation: {e}")
+    finally:
+        # Clean up temporary files
+        if "resized_image_path" in locals() and os.path.exists(resized_image_path):
+            try:
+                os.unlink(resized_image_path)
+                logging.info(f"Cleaned up temporary file: {resized_image_path}")
+            except Exception as e:
+                logging.warning(
+                    f"Failed to clean up temporary file {resized_image_path}: {e}"
+                )
+
+
+def upload_image_to_comfyui(image_path: str, comfyui_url: str):
+    """
+    Uploads an image to ComfyUI and returns the image name.
+
+    Args:
+        image_path (str): Path to the image file
+        comfyui_url (str): Base URL for ComfyUI
+
+    Returns:
+        str: The image name returned by ComfyUI, or None if upload failed
+    """
+    upload_url = f"{comfyui_url}/upload/image"
+
+    try:
+        # Get the MIME type of the image
+        mime_type, _ = mimetypes.guess_type(image_path)
+        if mime_type is None:
+            mime_type = "image/png"  # Default to PNG if guess fails
+
+        # Prepare the file for upload
+        with open(image_path, "rb") as f:
+            files = {
+                "image": (os.path.basename(image_path), f, mime_type),
+            }
+
+            # Make the request
+            response = requests.post(
+                upload_url,
+                files=files,
+                headers={"accept": "application/json"},
+            )
+
+            response.raise_for_status()
+            result = response.json()
+            return result.get("name")
+
+    except Exception as e:
+        logging.error(f"Error uploading image to ComfyUI: {e}")
+        return None
+
+
+def modify_comfyui_workflow_for_kontext(workflow_data, prompt, image_name, steps):
+    """
+    Modifies the ComfyUI workflow data with the provided prompt, image name, and steps.
+
+    Args:
+        workflow_data (dict): The workflow dictionary to modify
+        prompt (str): The prompt to use for generation
+        image_name (str): The name of the uploaded image
+        steps (int): Number of inference steps
+
+    Returns:
+        dict: The modified workflow data
+    """
+    try:
+        # Create a deep copy of the workflow to avoid modifying the original
+        import copy
+
+        modified_workflow = copy.deepcopy(workflow_data)
+
+        # Debug: Log the workflow structure
+        logging.info(f"Workflow has {len(modified_workflow)} nodes")
+
+        # Log all available node IDs and class_types for debugging
+        node_ids = list(modified_workflow.keys())
+        node_types = [
+            modified_workflow[node_id].get("class_type") for node_id in node_ids
+        ]
+        logging.info(f"Available node IDs: {node_ids}")
+        logging.info(f"Available node class_types: {node_types}")
+
+        # Find the NIMFLUXNode and LoadImage nodes by class_type
+        nimflux_node_id = None
+        loadimage_node_id = None
+
+        for node_id, node_data in modified_workflow.items():
+            if node_data.get("class_type") == "NIMFLUXNode":
+                nimflux_node_id = node_id
+                logging.info(f"Found NIMFLUXNode with ID: {node_id}")
+            elif node_data.get("class_type") == "LoadImage":
+                loadimage_node_id = node_id
+                logging.info(f"Found LoadImage node with ID: {node_id}")
+
+        if not nimflux_node_id:
+            logging.error("NIMFLUXNode not found in workflow")
+            return None
+
+        if not loadimage_node_id:
+            logging.error("LoadImage node not found in workflow")
+            return None
+
+        # Get the node data
+        nimflux_node = modified_workflow[nimflux_node_id]
+        loadimage_node = modified_workflow[loadimage_node_id]
+
+        # Check if NIMFLUXNode has the expected structure
+        if "inputs" not in nimflux_node:
+            logging.error("NIMFLUXNode missing inputs")
+            return None
+
+        # Update the prompt in the NIMFLUXNode
+        if "prompt" in nimflux_node["inputs"]:
+            nimflux_node["inputs"]["prompt"] = prompt
+            logging.info(f"Updated prompt to: {prompt}")
+        else:
+            logging.error("NIMFLUXNode missing prompt in inputs")
+            return None
+
+        # Update the steps in the NIMFLUXNode
+        if "steps" in nimflux_node["inputs"]:
+            nimflux_node["inputs"]["steps"] = steps
+            logging.info(f"Updated steps to: {steps}")
+        else:
+            logging.error("NIMFLUXNode missing steps in inputs")
+            return None
+
+        # Update the image filename in the LoadImage node
+        if "image" in loadimage_node["inputs"]:
+            loadimage_node["inputs"]["image"] = image_name
+            logging.info(f"Updated image filename to: {image_name}")
+        else:
+            logging.error("LoadImage node missing image in inputs")
+            return None
+
+        return modified_workflow
+
+    except Exception as e:
+        logging.error(f"Error modifying ComfyUI workflow: {e}")
+        logging.error(f"Exception type: {type(e).__name__}")
+        import traceback
+
+        logging.error(f"Traceback: {traceback.format_exc()}")
+        return None
+
+
+def execute_comfyui_workflow(workflow_data, comfyui_url):
+    """
+    Executes the ComfyUI workflow via the API and returns the output images.
+
+    Args:
+        workflow_data (dict): The workflow data to execute
+        comfyui_url (str): The base URL for ComfyUI
+
+    Returns:
+        dict: Dictionary of output images by node ID, or None on failure
+    """
+
+    try:
+        # Generate a unique client ID
+        client_id = str(uuid.uuid4())
+
+        # Queue the prompt
+        queue_url = f"{comfyui_url}/prompt"
+        payload = {"prompt": workflow_data, "client_id": client_id}
+
+        logging.info(f"Queueing ComfyUI workflow at {queue_url}...")
+
+        response = requests.post(
+            queue_url,
+            json=payload,
+            headers={"Content-Type": "application/json"},
+            timeout=60,
+        )
+
+        response.raise_for_status()
+        result = response.json()
+        logging.debug(f"ComfyUI API response: {result}")
+
+        prompt_id = result.get("prompt_id")
+
+        if not prompt_id:
+            logging.error("No prompt ID returned from ComfyUI")
+            logging.error(f"Full response: {result}")
+            return None
+
+        logging.info(f"ComfyUI workflow queued with prompt ID: {prompt_id}")
+
+        # Connect to WebSocket to receive execution updates and images
+        ws_url = f"ws://{comfyui_url.replace('http://', '').replace('https://', '')}/ws?clientId={client_id}"
+        logging.info(f"Connecting to ComfyUI WebSocket: {ws_url}")
+
+        # Check workflow status before connecting to WebSocket
+        try:
+            status_url = f"{comfyui_url}/prompt"
+            status_response = requests.get(status_url, timeout=10)
+            if status_response.status_code == 200:
+                status_data = status_response.json()
+                logging.info(f"ComfyUI status: {status_data}")
+
+                # Check if our prompt is in the queue or executing
+                if "queue_running" in status_data:
+                    queue_info = status_data["queue_running"]
+                    if (
+                        queue_info
+                        and "prompt_id" in queue_info
+                        and queue_info["prompt_id"] == prompt_id
+                    ):
+                        logging.info("Our workflow is currently executing")
+                    else:
+                        logging.info("Workflow is in queue or not found")
+            else:
+                logging.warning(
+                    f"Failed to get ComfyUI status: {status_response.status_code}"
+                )
+        except Exception as e:
+            logging.warning(f"Error checking ComfyUI status: {e}")
+
+        ws = websocket.WebSocket()
+        ws.settimeout(5)  # 5 second timeout for receive operations
+        ws.connect(ws_url)
+
+        output_images = {}
+        workflow_completed = False
+        start_time = datetime.now()
+        timeout_seconds = 300  # 5 minutes timeout
+
+        try:
+            while not workflow_completed:
+                # Check for timeout
+                if (datetime.now() - start_time).total_seconds() > timeout_seconds:
+                    logging.warning(
+                        "WebSocket timeout reached, stopping workflow monitoring"
+                    )
+                    break
+
+                try:
+                    # Receive message with a reasonable timeout
+                    out = ws.recv()
+                except websocket.WebSocketTimeoutException:
+                    # This is normal - just continue waiting
+                    continue
+                except Exception as e:
+                    logging.warning(f"WebSocket receive error: {e}")
+                    continue
+
+                if isinstance(out, str):
+                    try:
+                        message = json.loads(out)
+                        logging.debug(f"Received WebSocket message: {message}")
+
+                        if message["type"] == "executing":
+                            data = message["data"]
+                            if "prompt_id" in data and data["prompt_id"] == prompt_id:
+                                if data["node"] is None:
+                                    logging.info("ComfyUI workflow execution completed")
+                                    workflow_completed = True
+                                    break
+                                else:
+                                    logging.info(
+                                        f"ComfyUI executing node: {data['node']}"
+                                    )
+
+                        elif message["type"] == "executed":
+                            data = message["data"]
+                            if "node" in data:
+                                node_id = data["node"]
+                                logging.info(f"Node {node_id} completed")
+
+                                # Check if this is the SaveImage node and it has output
+                                if (
+                                    node_id == "1"
+                                    and "output" in data
+                                    and "images" in data["output"]
+                                ):
+                                    logging.info(
+                                        f"SaveImage node completed with {len(data['output']['images'])} images"
+                                    )
+                                    workflow_completed = True
+                                    break
+
+                        elif message["type"] == "progress":
+                            # Just log progress, don't need to do anything special
+                            pass
+
+                    except json.JSONDecodeError as e:
+                        logging.warning(f"Failed to parse WebSocket message: {e}")
+                        continue
+
+                else:
+                    # Binary data - this should be an image
+                    logging.info(f"Received binary data of length {len(out)} bytes")
+
+                    # Store the image data
+                    if "1" not in output_images:
+                        output_images["1"] = []
+                    output_images["1"].append(out)
+                    logging.info(
+                        f"Stored image, total images: {len(output_images['1'])}"
+                    )
+
+        finally:
+            ws.close()
+
+        # Log what we got from WebSocket
+        logging.info(
+            f"WebSocket monitoring completed. Workflow completed: {workflow_completed}"
+        )
+        logging.info(
+            f"Images received via WebSocket: {len(output_images.get('1', [])) if '1' in output_images else 0}"
+        )
+
+        # If we didn't get images via WebSocket, try the history API as a fallback
+        if not output_images:
+            logging.info(
+                "No images received via WebSocket, checking ComfyUI history..."
+            )
+            try:
+                history_url = f"{comfyui_url}/history"
+                response = requests.get(history_url, timeout=30)
+                if response.status_code == 200:
+                    history = response.json()
+
+                    if prompt_id in history:
+                        workflow_history = history[prompt_id]
+                        logging.info(f"Found workflow history for prompt {prompt_id}")
+
+                        # Check if SaveImage node has output
+                        if "1" in workflow_history.get("outputs", {}):
+                            save_image_output = workflow_history["outputs"]["1"]
+                            if "images" in save_image_output:
+                                images = save_image_output["images"]
+                                logging.info(
+                                    f"Found {len(images)} images in SaveImage output"
+                                )
+
+                                # Download the images
+                                if "1" not in output_images:
+                                    output_images["1"] = []
+
+                                for i, image_info in enumerate(images):
+                                    image_url = f"{comfyui_url}/view?filename={image_info['filename']}&type=output&subfolder={image_info.get('subfolder', '')}"
+                                    logging.info(
+                                        f"Downloading image {i+1} from: {image_url}"
+                                    )
+
+                                    img_response = requests.get(image_url, timeout=30)
+                                    if img_response.status_code == 200:
+                                        output_images["1"].append(img_response.content)
+                                        logging.info(
+                                            f"Successfully downloaded image {i+1}"
+                                        )
+                                    else:
+                                        logging.warning(
+                                            f"Failed to download image {i+1}: {img_response.status_code}"
+                                        )
+                else:
+                    logging.warning(
+                        f"Failed to get ComfyUI history: {response.status_code}"
+                    )
+            except Exception as e:
+                logging.warning(f"Error checking ComfyUI history: {e}")
+
+        if output_images:
+            total_images = sum(len(images) for images in output_images.values())
+            logging.info(f"Successfully received {total_images} total output images")
+            return output_images
+        else:
+            logging.warning("No output images received from ComfyUI workflow")
+            return None
+
+    except websocket.WebSocketException as e:
+        logging.error(f"WebSocket error during ComfyUI workflow execution: {e}")
+        return None
+    except requests.exceptions.ConnectionError as e:
+        logging.error(f"Could not connect to the ComfyUI server at {comfyui_url}")
+        logging.error(f"Details: {e}")
+        return None
+    except requests.exceptions.Timeout:
+        logging.error("The request to the ComfyUI server timed out after 60 seconds")
+        return None
+    except requests.exceptions.HTTPError as e:
+        logging.error(
+            f"ComfyUI API request failed with status code {e.response.status_code}"
+        )
+        logging.error(f"URL: {e.request.url}")
+        try:
+            error_json = e.response.json()
+            logging.error(f"Error Response: {json.dumps(error_json, indent=2)}")
+        except json.JSONDecodeError:
+            logging.error(f"Error Response: {e.response.text}")
+        return None
+    except Exception as e:
+        logging.error(
+            f"An unexpected error occurred during ComfyUI workflow execution: {e}"
+        )
+        return None

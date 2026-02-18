@@ -12,8 +12,10 @@ const emit = defineEmits<{
   reorder: [cutIds: string[]]
 }>()
 
+const generationsStore = useGenerationsStore()
 const listRef = ref<HTMLElement>()
 const localCuts = ref<Cut[]>([...props.cuts])
+const expandedCutId = ref<string | null>(null)
 
 watch(
   () => props.cuts,
@@ -30,6 +32,15 @@ useSortable(listRef, localCuts, {
     emit('reorder', cutIds)
   },
 })
+
+function toggleExpand(cutId: string) {
+  if (expandedCutId.value === cutId) {
+    expandedCutId.value = null
+  } else {
+    expandedCutId.value = cutId
+    generationsStore.fetchGenerations(props.projectId, cutId)
+  }
+}
 </script>
 
 <template>
@@ -39,7 +50,9 @@ useSortable(listRef, localCuts, {
       :key="cut.id"
       :cut="cut"
       :project-id="projectId"
+      :expanded="expandedCutId === cut.id"
       @preview="$emit('preview', $event)"
+      @toggle-expand="toggleExpand"
     />
   </div>
 </template>

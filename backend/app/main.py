@@ -7,7 +7,7 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.config import settings
-from app.routes import cuts, health, projects
+from app.routes import cuts, generations, health, projects, takes
 
 logger = logging.getLogger(__name__)
 
@@ -48,3 +48,5 @@ app.mount("/media", StaticFiles(directory=settings.media_dir), name="media")
 app.include_router(health.router, prefix="/api/v1")
 app.include_router(projects.router, prefix="/api/v1")
 app.include_router(cuts.router, prefix="/api/v1")
+app.include_router(generations.router, prefix="/api/v1")
+app.include_router(takes.router, prefix="/api/v1")

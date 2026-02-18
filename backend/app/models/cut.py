@@ -68,3 +68,7 @@ class Cut(Base):
     )
 
     project: Mapped["Project"] = relationship(back_populates="cuts")  # noqa: F821
+    generations: Mapped[list["Generation"]] = relationship(  # noqa: F821
+        back_populates="cut",
+        cascade="all, delete-orphan",
+    )

@@ -1,19 +1,22 @@
 <script setup lang="ts">
-import { GripVertical, Loader2, AlertCircle, Play, Trash2 } from 'lucide-vue-next'
+import { GripVertical, Loader2, AlertCircle, Play, Trash2, Sparkles, ChevronDown, ChevronUp } from 'lucide-vue-next'
 import type { Cut } from '~/types'
 
 const props = defineProps<{
   cut: Cut
   projectId: string
+  expanded?: boolean
 }>()
 
 const emit = defineEmits<{
   preview: [cut: Cut]
   delete: [cutId: string]
+  toggleExpand: [cutId: string]
 }>()
 
 const { mediaUrl } = useApi()
 const store = useProjectsStore()
+const generationsStore = useGenerationsStore()
 const deleting = ref(false)
 
 const thumbnailSrc = computed(() => mediaUrl(props.cut.thumbnail_path))
@@ -112,14 +115,45 @@ async function handleDelete() {
     </div>
 
     <!-- Actions -->
-    <Button
-      variant="ghost"
-      size="icon"
-      class="h-8 w-8 flex-shrink-0 opacity-0 transition-opacity group-hover:opacity-100"
-      :disabled="deleting"
-      @click="handleDelete"
-    >
-      <Trash2 class="h-4 w-4 text-destructive" />
-    </Button>
+    <div class="flex flex-shrink-0 items-center gap-1">
+      <TooltipProvider v-if="cut.status === 'ready'">
+        <Tooltip>
+          <TooltipTrigger as-child>
+            <Button
+              variant="ghost"
+              size="icon"
+              class="h-8 w-8"
+              @click="$emit('toggleExpand', cut.id)"
+            >
+              <ChevronUp v-if="expanded" class="h-4 w-4" />
+              <ChevronDown v-else class="h-4 w-4" />
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent>
+            <p>Expand to generate styled images and video takes</p>
+          </TooltipContent>
+        </Tooltip>
+      </TooltipProvider>
+      <Button
+        variant="ghost"
+        size="icon"
+        class="h-8 w-8 opacity-0 transition-opacity group-hover:opacity-100"
+        :disabled="deleting"
+        @click="handleDelete"
+      >
+        <Trash2 class="h-4 w-4 text-destructive" />
+      </Button>
+    </div>
+  </div>
+
+  <!-- Expanded generations section -->
+  <div v-if="expanded && cut.status === 'ready'" class="mt-3 border-t pt-3">
+    <GenerationList
+      :generations="generationsStore.generationsForCut(cut.id)"
+      :project-id="projectId"
+      :cut-id="cut.id"
+      :cut-width="cut.width"
+      :cut-height="cut.height"
+    />
   </div>
 </template>

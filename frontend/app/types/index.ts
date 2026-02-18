@@ -27,6 +27,62 @@ export interface Cut {
   updated_at: string
 }
 
+export type GenerationStatus =
+  | 'pending'
+  | 'extracting_frame'
+  | 'uploading_reference'
+  | 'generating'
+  | 'downloading'
+  | 'completed'
+  | 'error'
+
+export interface Generation {
+  id: string
+  cut_id: string
+  prompt: string
+  width: number
+  height: number
+  num_steps: number
+  cfg_scale: number
+  seed: number
+  invokeai_reference_image_name: string | null
+  invokeai_generated_image_name: string | null
+  actual_seed: number | null
+  reference_frame_path: string | null
+  output_image_path: string | null
+  status: GenerationStatus
+  error_message: string | null
+  created_at: string
+  updated_at: string
+}
+
+export type TakeStatus =
+  | 'pending'
+  | 'uploading_assets'
+  | 'generating'
+  | 'downloading'
+  | 'encoding_canny'
+  | 'completed'
+  | 'error'
+
+export interface Take {
+  id: string
+  generation_id: string
+  prompt: string
+  width: number
+  height: number
+  frame_count: number
+  seed: number
+  comfyui_prompt_id: string | null
+  actual_seed: number | null
+  output_video_path: string | null
+  canny_video_path: string | null
+  status: TakeStatus
+  error_message: string | null
+  created_at: string
+  updated_at: string
+}
+
 export interface Project {
   id: string
   name: string

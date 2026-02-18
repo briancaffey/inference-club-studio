@@ -4,6 +4,8 @@ import type { Cut } from '~/types'
 
 const route = useRoute()
 const store = useProjectsStore()
+const generationsStore = useGenerationsStore()
+const takesStore = useTakesStore()
 
 const projectId = route.params.id as string
 const previewCut = ref<Cut | null>(null)
@@ -18,7 +20,7 @@ onMounted(() => {
 })
 
 // Poll while any cut is still processing
-const pollInterval = ref<ReturnType<typeof setInterval>>()
+const cutPollInterval = ref<ReturnType<typeof setInterval>>()
 
 const hasProcessingCuts = computed(() =>
   store.currentProject?.cuts?.some(c =>
@@ -27,18 +29,71 @@ const hasProcessingCuts = computed(() =>
 )
 
 watch(hasProcessingCuts, (processing) => {
-  if (processing && !pollInterval.value) {
-    pollInterval.value = setInterval(() => {
+  if (processing && !cutPollInterval.value) {
+    cutPollInterval.value = setInterval(() => {
       store.fetchProject(projectId)
     }, 3000)
-  } else if (!processing && pollInterval.value) {
-    clearInterval(pollInterval.value)
-    pollInterval.value = undefined
+  } else if (!processing && cutPollInterval.value) {
+    clearInterval(cutPollInterval.value)
+    cutPollInterval.value = undefined
+  }
+})
+
+// Poll generations while any are in-progress
+const genPollInterval = ref<ReturnType<typeof setInterval>>()
+
+const hasActiveGenerations = computed(() => {
+  const cuts = store.currentProject?.cuts || []
+  return cuts.some(c => generationsStore.hasActiveGenerations(c.id))
+})
+
+watch(hasActiveGenerations, (active) => {
+  if (active && !genPollInterval.value) {
+    genPollInterval.value = setInterval(() => {
+      const cuts = store.currentProject?.cuts || []
+      for (const cut of cuts) {
+        if (generationsStore.hasActiveGenerations(cut.id)) {
+          generationsStore.fetchGenerations(projectId, cut.id)
+        }
+      }
+    }, 3000)
+  } else if (!active && genPollInterval.value) {
+    clearInterval(genPollInterval.value)
+    genPollInterval.value = undefined
+  }
+})
+
+// Poll takes while any are in-progress
+const takePollInterval = ref<ReturnType<typeof setInterval>>()
+
+const hasActiveTakes = computed(() => {
+  const allGenerationIds = Object.keys(takesStore.takes)
+  return allGenerationIds.some(gid => takesStore.hasActiveTakes(gid))
+})
+
+watch(hasActiveTakes, (active) => {
+  if (active && !takePollInterval.value) {
+    takePollInterval.value = setInterval(() => {
+      const cuts = store.currentProject?.cuts || []
+      for (const cut of cuts) {
+        const gens = generationsStore.generationsForCut(cut.id)
+        for (const gen of gens) {
+          if (takesStore.hasActiveTakes(gen.id)) {
+            takesStore.fetchTakes(projectId, cut.id, gen.id)
+          }
+        }
+      }
+    }, 3000)
+  } else if (!active && takePollInterval.value) {
+    clearInterval(takePollInterval.value)
+    takePollInterval.value = undefined
   }
 })
 
 onUnmounted(() => {
-  if (pollInterval.value) clearInterval(pollInterval.value)
+  if (cutPollInterval.value) clearInterval(cutPollInterval.value)
+  if (genPollInterval.value) clearInterval(genPollInterval.value)
+  if (takePollInterval.value) clearInterval(takePollInterval.value)
   store.currentProject = null
 })
 
