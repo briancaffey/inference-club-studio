@@ -77,9 +77,9 @@ def test_create_take(mock_task, client, db):
     assert resp.status_code == 201
     data = resp.json()
     assert data["prompt"] == "a cinematic scene"
-    assert data["width"] == 640
-    assert data["height"] == 448
-    assert data["frame_count"] == 122
+    assert data["width"] == 641
+    assert data["height"] == 449
+    assert data["frame_count"] == 121
     assert data["seed"] == -1
     assert data["status"] == "pending"
     assert mock_task.delay.call_count == 1
@@ -95,17 +95,18 @@ def test_create_take_custom_params(mock_task, client, db):
         _url(project.id, cut.id, generation.id),
         json={
             "prompt": "test",
-            "width": 512,
-            "height": 320,
-            "frame_count": 60,
+            "width": 513,
+            "height": 321,
+            "frame_count": 57,
             "seed": 42,
         },
     )
     assert resp.status_code == 201
     data = resp.json()
-    assert data["width"] == 512
-    assert data["height"] == 320
-    assert data["frame_count"] == 60
+    # Values are already valid (32n+1 for dims, 8n+1 for frames)
+    assert data["width"] == 513
+    assert data["height"] == 321
+    assert data["frame_count"] == 57
     assert data["seed"] == 42
 
 

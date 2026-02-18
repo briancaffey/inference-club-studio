@@ -13,8 +13,8 @@ from app.config import settings
 
 logger = logging.getLogger(__name__)
 
-# Load workflow template at module level
-_WORKFLOW_PATH = Path(__file__).parent / "video_ltx2_canny_to_video_distilled.json"
+# Load workflow template at module level (no-audio variant skips audio decode)
+_WORKFLOW_PATH = Path(__file__).parent / "video_ltx2_canny_to_video_no_audio.json"
 with open(_WORKFLOW_PATH) as _f:
     _WORKFLOW_TEMPLATE = json.load(_f)
 

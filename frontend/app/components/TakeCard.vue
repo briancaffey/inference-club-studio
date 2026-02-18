@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { Loader2, AlertCircle, Trash2, Film, Video } from 'lucide-vue-next'
+import { Loader2, AlertCircle, Trash2, Film, Video, Copy, RefreshCw } from 'lucide-vue-next'
 import type { Take } from '~/types'
 
 const props = defineProps<{
@@ -9,10 +9,15 @@ const props = defineProps<{
   generationId: string
 }>()
 
+const emit = defineEmits<{
+  regenerate: [take: Take]
+}>()
+
 const { mediaUrl } = useApi()
 const store = useTakesStore()
 const deleting = ref(false)
 const previewOpen = ref(false)
+const copied = ref(false)
 
 const videoSrc = computed(() => mediaUrl(props.take.output_video_path))
 const cannySrc = computed(() => mediaUrl(props.take.canny_video_path))
@@ -44,6 +49,12 @@ const statusLabel = computed(() => {
   }
 })
 
+async function copyPrompt() {
+  await navigator.clipboard.writeText(props.take.prompt)
+  copied.value = true
+  setTimeout(() => { copied.value = false }, 1500)
+}
+
 async function handleDelete() {
   deleting.value = true
   try {
@@ -59,7 +70,7 @@ async function handleDelete() {
     <div class="flex items-start gap-3">
       <!-- Video thumbnail -->
       <div
-        class="relative h-20 w-28 flex-shrink-0 cursor-pointer overflow-hidden rounded bg-muted"
+        class="relative h-28 w-40 flex-shrink-0 cursor-pointer overflow-hidden rounded bg-muted"
         @click="videoSrc && (previewOpen = true)"
       >
         <video
@@ -108,15 +119,51 @@ async function handleDelete() {
       </div>
 
       <!-- Actions -->
-      <Button
-        variant="ghost"
-        size="icon"
-        class="h-8 w-8 flex-shrink-0 opacity-0 transition-opacity group-hover:opacity-100"
-        :disabled="deleting"
-        @click="handleDelete"
-      >
-        <Trash2 class="h-4 w-4 text-destructive" />
-      </Button>
+      <div class="flex flex-shrink-0 items-center gap-1">
+        <TooltipProvider>
+          <Tooltip>
+            <TooltipTrigger as-child>
+              <Button
+                variant="ghost"
+                size="icon"
+                class="h-8 w-8 opacity-0 transition-opacity group-hover:opacity-100"
+                @click="copyPrompt"
+              >
+                <Copy class="h-4 w-4" :class="copied ? 'text-green-500' : ''" />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>
+              <p>{{ copied ? 'Copied!' : 'Copy prompt' }}</p>
+            </TooltipContent>
+          </Tooltip>
+        </TooltipProvider>
+        <TooltipProvider>
+          <Tooltip>
+            <TooltipTrigger as-child>
+              <Button
+                variant="ghost"
+                size="icon"
+                class="h-8 w-8 opacity-0 transition-opacity group-hover:opacity-100"
+                @click="$emit('regenerate', take)"
+              >
+                <RefreshCw class="h-4 w-4" />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>
+              <p>Create new take with these settings</p>
+            </TooltipContent>
+          </Tooltip>
+        </TooltipProvider>
+        <Button
+          variant="ghost"
+          size="icon"
+          class="h-8 w-8 opacity-0 transition-opacity group-hover:opacity-100"
+          :disabled="deleting"
+          @click="handleDelete"
+        >
+          <Trash2 class="h-4 w-4 text-destructive" />
+        </Button>
+      </div>
     </div>
 
     <!-- Video preview dialog -->

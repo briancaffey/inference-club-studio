@@ -32,9 +32,9 @@ class Take(Base):
 
     # User inputs
     prompt: Mapped[str] = mapped_column(Text, nullable=False)
-    width: Mapped[int] = mapped_column(Integer, nullable=False, default=640)
-    height: Mapped[int] = mapped_column(Integer, nullable=False, default=448)
-    frame_count: Mapped[int] = mapped_column(Integer, nullable=False, default=122)
+    width: Mapped[int] = mapped_column(Integer, nullable=False, default=641)
+    height: Mapped[int] = mapped_column(Integer, nullable=False, default=449)
+    frame_count: Mapped[int] = mapped_column(Integer, nullable=False, default=121)
     seed: Mapped[int] = mapped_column(BigInteger, nullable=False, default=-1)
 
     # ComfyUI tracking

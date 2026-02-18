@@ -10,6 +10,17 @@ const props = defineProps<{
 }>()
 
 const formOpen = ref(false)
+const prefill = ref<Take | null>(null)
+
+function openNew() {
+  prefill.value = null
+  formOpen.value = true
+}
+
+function openFromTake(take: Take) {
+  prefill.value = take
+  formOpen.value = true
+}
 </script>
 
 <template>
@@ -21,7 +32,7 @@ const formOpen = ref(false)
       <TooltipProvider>
         <Tooltip>
           <TooltipTrigger as-child>
-            <Button size="sm" variant="outline" @click="formOpen = true">
+            <Button size="sm" variant="outline" @click="openNew">
               <Film class="mr-1.5 h-3.5 w-3.5" />
               Create Take
             </Button>
@@ -45,6 +56,7 @@ const formOpen = ref(false)
         :project-id="projectId"
         :cut-id="cutId"
         :generation-id="generationId"
+        @regenerate="openFromTake"
       />
     </div>
 
@@ -53,6 +65,7 @@ const formOpen = ref(false)
       :project-id="projectId"
       :cut-id="cutId"
       :generation-id="generationId"
+      :prefill="prefill"
     />
   </div>
 </template>

@@ -48,6 +48,14 @@ const statusLabel = computed(() => {
   }
 })
 
+function handleCardClick(e: MouseEvent) {
+  const target = e.target as HTMLElement
+  if (target.closest('button') || target.closest('img')) return
+  if (props.generation.status === 'completed') {
+    emit('toggleExpand', props.generation.id)
+  }
+}
+
 async function handleDelete() {
   deleting.value = true
   try {
@@ -60,12 +68,16 @@ async function handleDelete() {
 
 <template>
   <div>
-    <div class="group rounded-lg border bg-card p-3 transition-shadow hover:shadow-sm">
+    <div
+      class="group rounded-lg border bg-card p-3 transition-shadow hover:shadow-sm"
+      :class="generation.status === 'completed' ? 'cursor-pointer' : ''"
+      @click="handleCardClick"
+    >
       <div class="flex items-start gap-3">
         <!-- Output image thumbnail -->
         <div
-          class="relative h-20 w-20 flex-shrink-0 cursor-pointer overflow-hidden rounded bg-muted"
-          @click="outputSrc && (previewOpen = true)"
+          class="relative h-28 w-28 flex-shrink-0 cursor-pointer overflow-hidden rounded bg-muted"
+          @click.stop="outputSrc && (previewOpen = true)"
         >
           <img
             v-if="outputSrc"
@@ -104,30 +116,14 @@ async function handleDelete() {
 
         <!-- Actions -->
         <div class="flex flex-shrink-0 items-center gap-1">
-          <TooltipProvider v-if="generation.status === 'completed'">
-            <Tooltip>
-              <TooltipTrigger as-child>
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  class="h-8 w-8"
-                  @click="$emit('toggleExpand', generation.id)"
-                >
-                  <ChevronUp v-if="expanded" class="h-4 w-4" />
-                  <ChevronDown v-else class="h-4 w-4" />
-                </Button>
-              </TooltipTrigger>
-              <TooltipContent>
-                <p>Click to generate video takes from this styled image</p>
-              </TooltipContent>
-            </Tooltip>
-          </TooltipProvider>
+          <ChevronUp v-if="expanded && generation.status === 'completed'" class="h-4 w-4 text-muted-foreground" />
+          <ChevronDown v-else-if="generation.status === 'completed'" class="h-4 w-4 text-muted-foreground" />
           <Button
             variant="ghost"
             size="icon"
             class="h-8 w-8 opacity-0 transition-opacity group-hover:opacity-100"
             :disabled="deleting"
-            @click="handleDelete"
+            @click.stop="handleDelete"
           >
             <Trash2 class="h-4 w-4 text-destructive" />
           </Button>
