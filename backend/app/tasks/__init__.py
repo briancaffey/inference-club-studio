@@ -1,3 +1,8 @@
+from app.tasks.cut_ai import (  # noqa: F401
+    generate_clip_overview,
+    generate_first_frame_description,
+    queue_cut_ai_analysis,
+)
 from app.tasks.cuts import (  # noqa: F401
     extract_cut_audio,
     extract_cut_thumbnail,

@@ -5,6 +5,7 @@ from app.celery_app import celery
 from app.config import settings
 from app.database import SessionLocal
 from app.models.cut import Cut, CutStatus
+from app.tasks.cut_ai import queue_cut_ai_analysis
 from app.utils.media import ensure_media_dir, get_media_info
 
 logger = logging.getLogger(__name__)
@@ -187,6 +188,8 @@ def extract_cut_audio(self, cut_id: str):
             )
 
         db.commit()
+        if cut.status == CutStatus.READY.value:
+            queue_cut_ai_analysis.delay(cut_id)
 
     except Exception as exc:
         logger.exception("Audio extraction error for cut %s", cut_id)

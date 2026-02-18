@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { Sparkles } from 'lucide-vue-next'
+import { Loader2, Sparkles, WandSparkles } from 'lucide-vue-next'
 
 const props = defineProps<{
   projectId: string
@@ -11,7 +11,9 @@ const props = defineProps<{
 const open = defineModel<boolean>('open', { default: false })
 
 const store = useGenerationsStore()
+const cutAiStore = useCutAiStore()
 const submitting = ref(false)
+const generatingPromptDraft = ref(false)
 
 const defaultWidth = computed(() => props.cutWidth || 1024)
 const defaultHeight = computed(() => props.cutHeight || 1024)
@@ -24,12 +26,24 @@ const form = reactive({
   seed: -1,
 })
 
+const aiHelper = reactive({
+  style: '',
+  content: '',
+  generated: '',
+})
+
 // Reset dimensions to defaults when dialog opens
-watch(open, (isOpen) => {
+watch(open, async (isOpen) => {
   if (isOpen) {
     form.width = defaultWidth.value
     form.height = defaultHeight.value
     selectedRatio.value = 'original'
+    aiHelper.generated = ''
+    await cutAiStore.fetchState(props.projectId, props.cutId).catch(() => {})
+    const ai = cutAiStore.stateForCut(props.cutId)
+    if (!aiHelper.content.trim()) {
+      aiHelper.content = ai?.first_frame_description_text || ai?.clip_overview_text || ''
+    }
   }
 })
 
@@ -59,6 +73,21 @@ function applyRatio(preset: (typeof ratioPresets)[number]) {
     const { w, h } = preset.getSize()
     form.width = w
     form.height = h
+  }
+}
+
+async function generatePromptDraft() {
+  if (!aiHelper.style.trim()) return
+  generatingPromptDraft.value = true
+  try {
+    const draft = await cutAiStore.createFluxPromptDraft(props.projectId, props.cutId, {
+      style: aiHelper.style,
+      content: aiHelper.content || undefined,
+    })
+    aiHelper.generated = draft.prompt_text
+    form.prompt = draft.prompt_text
+  } finally {
+    generatingPromptDraft.value = false
   }
 }
 
@@ -92,8 +121,63 @@ async function handleSubmit() {
       </DialogHeader>
 
       <form class="space-y-4" @submit.prevent="handleSubmit">
+        <div class="space-y-2 rounded-md border bg-muted/30 p-3">
+          <div class="flex items-center justify-between">
+            <label class="flex items-center gap-2 text-sm font-medium">
+              <WandSparkles class="h-4 w-4" />
+              AI Prompt Helper (Qwen3-VL)
+            </label>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              :disabled="generatingPromptDraft || !aiHelper.style.trim()"
+              @click="generatePromptDraft"
+            >
+              <Loader2 v-if="generatingPromptDraft" class="mr-1.5 h-3.5 w-3.5 animate-spin" />
+              <WandSparkles v-else class="mr-1.5 h-3.5 w-3.5" />
+              Generate Draft
+            </Button>
+          </div>
+          <div class="space-y-1">
+            <label class="text-xs text-muted-foreground">Style</label>
+            <Input
+              v-model="aiHelper.style"
+              placeholder="e.g. painterly cinematic neon noir"
+            />
+          </div>
+          <div class="space-y-1">
+            <label class="text-xs text-muted-foreground">Content</label>
+            <textarea
+              v-model="aiHelper.content"
+              class="flex min-h-[70px] w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              placeholder="Optional. Defaults to first-frame/clip insights if available."
+            />
+          </div>
+          <div v-if="aiHelper.generated" class="space-y-1">
+            <div class="flex items-center justify-between">
+              <label class="text-xs text-muted-foreground">Generated Draft</label>
+              <CopyButton
+                :text="aiHelper.generated"
+                tooltip="Copy draft"
+                class="h-7 w-7"
+              />
+            </div>
+            <p class="max-h-28 overflow-auto whitespace-pre-wrap rounded border bg-background p-2 text-xs">
+              {{ aiHelper.generated }}
+            </p>
+          </div>
+        </div>
+
         <div class="space-y-2">
-          <label class="text-sm font-medium">Prompt</label>
+          <div class="flex items-center justify-between">
+            <label class="text-sm font-medium">Prompt</label>
+            <CopyButton
+              :text="form.prompt"
+              tooltip="Copy prompt"
+              class="h-7 w-7"
+            />
+          </div>
           <textarea
             v-model="form.prompt"
             class="flex min-h-[80px] w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"

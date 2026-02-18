@@ -109,7 +109,8 @@ def delete_cut(project_id: uuid.UUID, cut_id: uuid.UUID, db: Session = Depends(g
     deleted_order = cut.order
 
     # Delete associated files
-    for path in [cut.file_path, cut.thumbnail_path, cut.audio_path]:
+    ai_frame_path = cut.ai_state.first_frame_path if cut.ai_state else None
+    for path in [cut.file_path, cut.thumbnail_path, cut.audio_path, ai_frame_path]:
         if path and os.path.exists(path):
             os.remove(path)
 

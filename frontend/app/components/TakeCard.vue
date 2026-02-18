@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { Loader2, AlertCircle, Trash2, Film, Copy, RefreshCw } from 'lucide-vue-next'
+import { Loader2, AlertCircle, Trash2, Film, RefreshCw } from 'lucide-vue-next'
 import type { Take } from '~/types'
 
 const props = defineProps<{
@@ -19,7 +19,6 @@ const { mediaUrl } = useApi()
 const store = useTakesStore()
 const deleting = ref(false)
 const previewOpen = ref(false)
-const copied = ref(false)
 
 const videoSrc = computed(() => mediaUrl(props.take.output_video_path))
 const cannySrc = computed(() => mediaUrl(props.take.canny_video_path))
@@ -58,12 +57,6 @@ const statusLabel = computed(() => {
       return props.take.status
   }
 })
-
-async function copyPrompt() {
-  await navigator.clipboard.writeText(props.take.prompt)
-  copied.value = true
-  setTimeout(() => { copied.value = false }, 1500)
-}
 
 async function handleDelete() {
   deleting.value = true
@@ -174,23 +167,12 @@ onUnmounted(stopSync)
 
       <!-- Actions -->
       <div class="flex flex-shrink-0 items-center gap-1">
-        <TooltipProvider>
-          <Tooltip>
-            <TooltipTrigger as-child>
-              <Button
-                variant="ghost"
-                size="icon"
-                class="h-8 w-8 opacity-0 transition-opacity group-hover:opacity-100"
-                @click="copyPrompt"
-              >
-                <Copy class="h-4 w-4" :class="copied ? 'text-green-500' : ''" />
-              </Button>
-            </TooltipTrigger>
-            <TooltipContent>
-              <p>{{ copied ? 'Copied!' : 'Copy prompt' }}</p>
-            </TooltipContent>
-          </Tooltip>
-        </TooltipProvider>
+        <CopyButton
+          :text="take.prompt"
+          tooltip="Copy prompt"
+          copied-tooltip="Copied!"
+          class="h-8 w-8 opacity-0 transition-opacity group-hover:opacity-100"
+        />
         <TooltipProvider>
           <Tooltip>
             <TooltipTrigger as-child>

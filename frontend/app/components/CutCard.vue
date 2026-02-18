@@ -147,6 +147,11 @@ async function handleDelete() {
 
   <!-- Expanded generations section -->
   <div v-if="expanded && cut.status === 'ready'" class="mt-3 border-t pt-3">
+    <CutInsightsPanel
+      :project-id="projectId"
+      :cut-id="cut.id"
+      class="mb-3"
+    />
     <GenerationList
       :generations="generationsStore.generationsForCut(cut.id)"
       :project-id="projectId"

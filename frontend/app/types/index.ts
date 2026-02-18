@@ -5,6 +5,56 @@ export type CutStatus =
   | 'ready'
   | 'error'
 
+export type CutAIStatus = 'pending' | 'queued' | 'running' | 'completed' | 'error'
+
+export type CutAIAnalysisType =
+  | 'clip_overview'
+  | 'first_frame'
+  | 'flux_style_content_prompt'
+
+export interface CutAIRun {
+  id: string
+  cut_id: string
+  analysis_type: CutAIAnalysisType | string
+  status: CutAIStatus | string
+  prompt_key: string
+  prompt_input: Record<string, unknown> | null
+  prompt_text: string
+  response_text: string | null
+  model_name: string
+  prompt_tokens: number | null
+  completion_tokens: number | null
+  temperature: number | null
+  max_tokens: number | null
+  error_message: string | null
+  created_at: string
+  started_at: string | null
+  completed_at: string | null
+  updated_at: string
+}
+
+export interface CutAIState {
+  id: string
+  cut_id: string
+  clip_overview_text: string | null
+  first_frame_description_text: string | null
+  first_frame_path: string | null
+  clip_overview_status: CutAIStatus | string
+  first_frame_status: CutAIStatus | string
+  last_error_message: string | null
+  clip_overview_run: CutAIRun | null
+  first_frame_run: CutAIRun | null
+  created_at: string
+  updated_at: string
+}
+
+export interface FluxPromptDraftResponse {
+  draft_id: string
+  run: CutAIRun
+  prompt_text: string
+  created_at: string
+}
+
 export interface Cut {
   id: string
   project_id: string
@@ -23,6 +73,7 @@ export interface Cut {
   audio_path: string | null
   status: CutStatus
   error_message: string | null
+  ai_state?: CutAIState | null
   created_at: string
   updated_at: string
 }

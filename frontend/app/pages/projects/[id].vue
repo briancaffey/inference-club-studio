@@ -179,6 +179,7 @@ async function saveEdit() {
 
     <VideoPreviewDialog
       v-model:open="previewOpen"
+      :project-id="projectId"
       :cut="previewCut"
     />
   </div>

@@ -117,6 +117,12 @@ async function handleDelete() {
 
         <!-- Actions -->
         <div class="flex flex-shrink-0 items-center gap-1">
+          <CopyButton
+            :text="generation.prompt"
+            tooltip="Copy prompt"
+            copied-tooltip="Copied!"
+            class="h-8 w-8 opacity-0 transition-opacity group-hover:opacity-100"
+          />
           <ChevronUp v-if="expanded && generation.status === 'completed'" class="h-4 w-4 text-muted-foreground" />
           <ChevronDown v-else-if="generation.status === 'completed'" class="h-4 w-4 text-muted-foreground" />
           <Button

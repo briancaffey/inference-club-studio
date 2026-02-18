@@ -72,3 +72,18 @@ class Cut(Base):
         back_populates="cut",
         cascade="all, delete-orphan",
     )
+    ai_state: Mapped["CutAIState | None"] = relationship(  # noqa: F821
+        back_populates="cut",
+        cascade="all, delete-orphan",
+        uselist=False,
+    )
+    ai_runs: Mapped[list["CutAIRun"]] = relationship(  # noqa: F821
+        back_populates="cut",
+        cascade="all, delete-orphan",
+        order_by="CutAIRun.created_at.desc()",
+    )
+    prompt_drafts: Mapped[list["PromptDraft"]] = relationship(  # noqa: F821
+        back_populates="cut",
+        cascade="all, delete-orphan",
+        order_by="PromptDraft.created_at.desc()",
+    )

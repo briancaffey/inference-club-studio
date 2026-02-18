@@ -20,7 +20,7 @@ class QwenVLError(Exception):
 
 @dataclass
 class VideoAnalysis:
-    """Result from a video analysis request."""
+    """Result from a chat completion request."""
 
     content: str
     model: str
@@ -40,6 +40,42 @@ class QwenVLClient:
         self.url = (url or settings.qwen_vl_url).rstrip("/")
         self.model = model
         self.timeout = timeout
+
+    async def _request_completion(self, payload: dict) -> VideoAnalysis:
+        endpoint = f"{self.url}/v1/chat/completions"
+
+        try:
+            async with httpx.AsyncClient(timeout=self.timeout) as client:
+                response = await client.post(
+                    endpoint,
+                    json=payload,
+                    headers={"Content-Type": "application/json"},
+                )
+                response.raise_for_status()
+
+        except httpx.TimeoutException:
+            raise QwenVLError(f"Request timed out after {self.timeout}s.")
+        except httpx.HTTPStatusError as e:
+            body = e.response.text[:500] if e.response else "no body"
+            raise QwenVLError(f"vLLM returned HTTP {e.response.status_code}: {body}")
+        except httpx.RequestError as e:
+            raise QwenVLError(f"Failed to connect to vLLM at {self.url}: {e}")
+
+        data = response.json()
+        choice = data.get("choices", [{}])[0]
+        message = choice.get("message", {})
+        usage = data.get("usage", {})
+
+        content = message.get("content", "")
+        if not content:
+            raise QwenVLError("Empty response from model")
+
+        return VideoAnalysis(
+            content=content,
+            model=data.get("model", self.model),
+            prompt_tokens=usage.get("prompt_tokens", 0),
+            completion_tokens=usage.get("completion_tokens", 0),
+        )
 
     async def analyze_video(
         self,
@@ -89,52 +125,12 @@ class QwenVLClient:
             "temperature": temperature,
             "top_p": top_p,
         }
-
-        endpoint = f"{self.url}/v1/chat/completions"
-        logger.info("Sending video analysis request to %s", endpoint)
-
-        try:
-            async with httpx.AsyncClient(timeout=self.timeout) as client:
-                response = await client.post(
-                    endpoint,
-                    json=payload,
-                    headers={"Content-Type": "application/json"},
-                )
-                response.raise_for_status()
-
-        except httpx.TimeoutException:
-            raise QwenVLError(
-                f"Request timed out after {self.timeout}s. "
-                "The video may be too large or the model too slow."
-            )
-        except httpx.HTTPStatusError as e:
-            body = e.response.text[:500] if e.response else "no body"
-            raise QwenVLError(
-                f"vLLM returned HTTP {e.response.status_code}: {body}"
-            )
-        except httpx.RequestError as e:
-            raise QwenVLError(f"Failed to connect to vLLM at {self.url}: {e}")
-
-        data = response.json()
-        choice = data.get("choices", [{}])[0]
-        message = choice.get("message", {})
-        usage = data.get("usage", {})
-
-        content = message.get("content", "")
-        if not content:
-            raise QwenVLError("Empty response from model")
-
+        result = await self._request_completion(payload)
         logger.info(
             "Video analysis complete: %d tokens generated",
-            usage.get("completion_tokens", 0),
+            result.completion_tokens,
         )
-
-        return VideoAnalysis(
-            content=content,
-            model=data.get("model", self.model),
-            prompt_tokens=usage.get("prompt_tokens", 0),
-            completion_tokens=usage.get("completion_tokens", 0),
-        )
+        return result
 
     async def analyze_image(
         self,
@@ -179,44 +175,25 @@ class QwenVLClient:
             "temperature": temperature,
             "top_p": top_p,
         }
+        logger.info("Sending image analysis request for %s", image_path)
+        return await self._request_completion(payload)
 
-        endpoint = f"{self.url}/v1/chat/completions"
-        logger.info("Sending image analysis request to %s", endpoint)
-
-        try:
-            async with httpx.AsyncClient(timeout=self.timeout) as client:
-                response = await client.post(
-                    endpoint,
-                    json=payload,
-                    headers={"Content-Type": "application/json"},
-                )
-                response.raise_for_status()
-
-        except httpx.TimeoutException:
-            raise QwenVLError(f"Request timed out after {self.timeout}s.")
-        except httpx.HTTPStatusError as e:
-            body = e.response.text[:500] if e.response else "no body"
-            raise QwenVLError(
-                f"vLLM returned HTTP {e.response.status_code}: {body}"
-            )
-        except httpx.RequestError as e:
-            raise QwenVLError(f"Failed to connect to vLLM at {self.url}: {e}")
-
-        data = response.json()
-        choice = data.get("choices", [{}])[0]
-        message = choice.get("message", {})
-        usage = data.get("usage", {})
-
-        content = message.get("content", "")
-        if not content:
-            raise QwenVLError("Empty response from model")
-
-        return VideoAnalysis(
-            content=content,
-            model=data.get("model", self.model),
-            prompt_tokens=usage.get("prompt_tokens", 0),
-            completion_tokens=usage.get("completion_tokens", 0),
-        )
+    async def generate_text(
+        self,
+        prompt: str,
+        max_tokens: int = 512,
+        temperature: float = 0.4,
+        top_p: float = 0.8,
+    ) -> VideoAnalysis:
+        payload = {
+            "model": self.model,
+            "messages": [{"role": "user", "content": prompt}],
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+            "top_p": top_p,
+        }
+        logger.info("Sending text generation request to %s", self.url)
+        return await self._request_completion(payload)
 
     async def check_health(self) -> bool:
         """Check if the vLLM service is reachable."""
