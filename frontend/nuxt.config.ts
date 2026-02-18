@@ -20,4 +20,10 @@ export default defineNuxtConfig({
   colorMode: {
     classSuffix: '',
   },
+
+  runtimeConfig: {
+    public: {
+      apiBase: 'http://localhost:8000',
+    },
+  },
 })

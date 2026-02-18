@@ -1,0 +1,56 @@
+[project]
+name = "inference-club-studio"
+version = "0.1.0"
+description = "Audio/video processing backend with agentic AI capabilities"
+requires-python = ">=3.12"
+dependencies = [
+    # Web framework
+    "fastapi",
+    "uvicorn[standard]",
+    "python-multipart",
+    # Task queue
+    "celery[redis]",
+    "redis",
+    # Database
+    "sqlalchemy",
+    "alembic",
+    "psycopg2-binary",
+    # Config
+    "pydantic-settings",
+    # AI/LLM
+    "openai==2.21.0",
+    "llama-index==0.14.14",
+    # Media/Audio/Video
+    "ffmpeg-python",
+    "pydub",
+    "soundfile",
+    "python-magic",
+]
+
+[dependency-groups]
+dev = [
+    "pytest",
+    "pytest-asyncio",
+    "httpx",
+    "black",
+    "isort",
+    "flake8",
+    "watchfiles",
+]
+
+[tool.black]
+line-length = 88
+target-version = ["py312"]
+
+[tool.isort]
+profile = "black"
+line_length = 88
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = "test_*.py"
+python_functions = "test_*"
+
+[tool.flake8]
+max-line-length = 88
+extend-ignore = ["E203", "W503"]

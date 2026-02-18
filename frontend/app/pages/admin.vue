@@ -1,5 +1,12 @@
 <script setup lang="ts">
-import { Settings, ExternalLink } from 'lucide-vue-next'
+import { Settings, ExternalLink, Activity, CheckCircle, XCircle, Loader2 } from 'lucide-vue-next'
+
+const config = useRuntimeConfig()
+
+const { data: health, error, status, refresh } = useFetch<{ status: string }>(
+  `${config.public.apiBase}/api/v1/health`,
+  { server: false }
+)
 </script>
 
 <template>
@@ -10,6 +17,39 @@ import { Settings, ExternalLink } from 'lucide-vue-next'
     />
 
     <div class="grid gap-6 sm:grid-cols-2">
+      <Card>
+        <CardHeader>
+          <CardTitle class="flex items-center gap-2">
+            <Activity class="h-5 w-5" />
+            API Status
+          </CardTitle>
+          <CardDescription>
+            Backend health check.
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          <div class="flex items-center gap-3">
+            <template v-if="status === 'idle' || status === 'pending'">
+              <Loader2 class="h-5 w-5 animate-spin text-muted-foreground" />
+              <span class="text-sm text-muted-foreground">Checking...</span>
+            </template>
+            <template v-else-if="!error && health?.status === 'ok'">
+              <CheckCircle class="h-5 w-5 text-green-500" />
+              <span class="text-sm text-green-600 dark:text-green-400">API is healthy</span>
+            </template>
+            <template v-else>
+              <XCircle class="h-5 w-5 text-red-500" />
+              <span class="text-sm text-red-600 dark:text-red-400">API unreachable</span>
+            </template>
+          </div>
+        </CardContent>
+        <CardFooter>
+          <Button variant="outline" size="sm" @click="refresh()">
+            Refresh
+          </Button>
+        </CardFooter>
+      </Card>
+
       <Card>
         <CardHeader>
           <CardTitle class="flex items-center gap-2">
@@ -40,6 +80,18 @@ import { Settings, ExternalLink } from 'lucide-vue-next'
               <ExternalLink class="mr-2 h-4 w-4" />
               About Inference Club Studio
             </NuxtLink>
+          </Button>
+          <Button variant="outline" as-child class="justify-start">
+            <a href="http://localhost:8000/docs" target="_blank">
+              <ExternalLink class="mr-2 h-4 w-4" />
+              API Documentation
+            </a>
+          </Button>
+          <Button variant="outline" as-child class="justify-start">
+            <a href="http://localhost:5555" target="_blank">
+              <ExternalLink class="mr-2 h-4 w-4" />
+              Flower (Celery Monitor)
+            </a>
           </Button>
         </CardContent>
       </Card>

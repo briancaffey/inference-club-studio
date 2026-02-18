@@ -1,0 +1,100 @@
+x-backend-env: &backend-env
+  DATABASE_URL: postgresql://postgres:postgres@postgres:5432/inference_club
+  REDIS_URL: redis://redis:6379/0
+  MEDIA_DIR: /app/media
+  OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+
+x-backend-common: &backend-common
+  build:
+    context: ./backend
+    target: dev
+  volumes:
+    - ./backend/app:/app/app
+    - ./backend/tests:/app/tests
+    - ./backend/alembic:/app/alembic
+    - ./media:/app/media
+  depends_on:
+    postgres:
+      condition: service_healthy
+    redis:
+      condition: service_healthy
+    migrate:
+      condition: service_completed_successfully
+  environment:
+    <<: *backend-env
+
+services:
+  migrate:
+    build:
+      context: ./backend
+      target: dev
+    volumes:
+      - ./backend/app:/app/app
+      - ./backend/alembic:/app/alembic
+    environment:
+      <<: *backend-env
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: uv run python -m app.db.migrate
+    restart: "no"
+
+  api:
+    <<: *backend-common
+    ports:
+      - "8000:8000"
+    command: uv run uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+
+  celery-worker:
+    <<: *backend-common
+    command: uv run watchfiles --filter python "celery -A app.celery_app worker --loglevel=info" /app/app
+
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: inference_club
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    volumes:
+      - redis_data:/data
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  flower:
+    image: mher/flower:2.0.1
+    ports:
+      - "5555:5555"
+    environment:
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/0
+      FLOWER_PORT: "5555"
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:5555/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+volumes:
+  postgres_data:
+  redis_data:

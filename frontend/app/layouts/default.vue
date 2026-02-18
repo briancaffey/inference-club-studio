@@ -3,6 +3,7 @@ const route = useRoute()
 
 const navLinks = [
   { label: 'Home', to: '/' },
+  { label: 'Projects', to: '/projects' },
   { label: 'About', to: '/about' },
   { label: 'Admin', to: '/admin' },
 ]
