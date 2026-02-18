@@ -6,6 +6,7 @@ x-backend-env: &backend-env
   INVOKEAI_URL: ${INVOKEAI_URL:-http://192.168.5.173:9090}
   INVOKEAI_BOARD_ID: ${INVOKEAI_BOARD_ID:-bc97c0fe-13b5-4a90-a87c-9745ed4dea39}
   COMFYUI_URL: ${COMFYUI_URL:-http://192.168.6.19:8188}
+  QWEN_VL_URL: ${QWEN_VL_URL:-http://192.168.5.253:8000}
 
 x-backend-common: &backend-common
   build:
@@ -14,6 +15,7 @@ x-backend-common: &backend-common
   volumes:
     - ./backend/app:/app/app
     - ./backend/tests:/app/tests
+    - ./backend/scripts:/app/scripts
     - ./backend/alembic:/app/alembic
     - ./media:/app/media
   depends_on:
