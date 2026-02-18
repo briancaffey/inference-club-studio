@@ -8,6 +8,7 @@ const props = defineProps<{
   cutId: string
   expanded?: boolean
   takes: Take[]
+  cutFilePath: string | null
 }>()
 
 const emit = defineEmits<{
@@ -150,6 +151,8 @@ async function handleDelete() {
         :project-id="projectId"
         :cut-id="cutId"
         :generation-id="generation.id"
+        :cut-file-path="cutFilePath"
+        :generation-image-path="generation.output_image_path"
       />
     </div>
   </div>

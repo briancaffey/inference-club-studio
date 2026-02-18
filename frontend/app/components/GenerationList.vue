@@ -8,6 +8,7 @@ const props = defineProps<{
   cutId: string
   cutWidth: number | null
   cutHeight: number | null
+  cutFilePath: string | null
 }>()
 
 const formOpen = ref(false)
@@ -58,6 +59,7 @@ function toggleExpand(generationId: string) {
         :cut-id="cutId"
         :expanded="expandedGenerationId === gen.id"
         :takes="takesStore.takesForGeneration(gen.id)"
+        :cut-file-path="cutFilePath"
         @toggle-expand="toggleExpand"
       />
     </div>

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { Loader2, AlertCircle, Trash2, Film, Video, Copy, RefreshCw } from 'lucide-vue-next'
+import { Loader2, AlertCircle, Trash2, Film, Copy, RefreshCw } from 'lucide-vue-next'
 import type { Take } from '~/types'
 
 const props = defineProps<{
@@ -7,6 +7,8 @@ const props = defineProps<{
   projectId: string
   cutId: string
   generationId: string
+  cutFilePath: string | null
+  generationImagePath: string | null
 }>()
 
 const emit = defineEmits<{
@@ -21,6 +23,14 @@ const copied = ref(false)
 
 const videoSrc = computed(() => mediaUrl(props.take.output_video_path))
 const cannySrc = computed(() => mediaUrl(props.take.canny_video_path))
+const cutVideoSrc = computed(() => mediaUrl(props.cutFilePath))
+const generationImgSrc = computed(() => mediaUrl(props.generationImagePath))
+
+// Video sync refs — take is the master, others follow
+const takeVideoRef = ref<HTMLVideoElement | null>(null)
+const cannyVideoRef = ref<HTMLVideoElement | null>(null)
+const cutVideoRef = ref<HTMLVideoElement | null>(null)
+let syncRaf: number | null = null
 
 const isProcessing = computed(() =>
   ['pending', 'uploading_assets', 'generating', 'downloading', 'encoding_canny'].includes(
@@ -63,6 +73,59 @@ async function handleDelete() {
     deleting.value = false
   }
 }
+
+// Sync a follower video to the master take video
+function syncFollower(master: HTMLVideoElement, follower: HTMLVideoElement) {
+  const masterDuration = master.duration
+  if (!masterDuration || isNaN(masterDuration)) return
+
+  const followerDuration = follower.duration
+  if (!followerDuration || isNaN(followerDuration)) return
+
+  const targetTime = master.currentTime % followerDuration
+
+  if (Math.abs(follower.currentTime - targetTime) > 0.15) {
+    follower.currentTime = targetTime
+  }
+
+  if (!master.paused && follower.paused) {
+    follower.play()
+  } else if (master.paused && !follower.paused) {
+    follower.pause()
+  }
+}
+
+function syncVideos() {
+  const takeVid = takeVideoRef.value
+  if (!takeVid) return
+
+  if (cutVideoRef.value) syncFollower(takeVid, cutVideoRef.value)
+  if (cannyVideoRef.value) syncFollower(takeVid, cannyVideoRef.value)
+
+  syncRaf = requestAnimationFrame(syncVideos)
+}
+
+function startSync() {
+  if (syncRaf) cancelAnimationFrame(syncRaf)
+  syncRaf = requestAnimationFrame(syncVideos)
+}
+
+function stopSync() {
+  if (syncRaf) {
+    cancelAnimationFrame(syncRaf)
+    syncRaf = null
+  }
+}
+
+watch(previewOpen, (open) => {
+  if (open) {
+    nextTick(startSync)
+  } else {
+    stopSync()
+  }
+})
+
+onUnmounted(stopSync)
 </script>
 
 <template>
@@ -103,15 +166,6 @@ async function handleDelete() {
             <AlertCircle v-if="take.status === 'error'" class="mr-1 h-3 w-3" />
             {{ statusLabel }}
           </Badge>
-          <a
-            v-if="cannySrc"
-            :href="cannySrc"
-            target="_blank"
-            class="inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground"
-          >
-            <Video class="h-3 w-3" />
-            Canny
-          </a>
         </div>
         <p v-if="take.error_message" class="mt-1 text-xs text-destructive">
           {{ take.error_message }}
@@ -166,20 +220,75 @@ async function handleDelete() {
       </div>
     </div>
 
-    <!-- Video preview dialog -->
+    <!-- 2x2 preview dialog -->
     <Dialog v-model:open="previewOpen">
-      <DialogContent class="max-w-3xl">
+      <DialogContent class="max-w-[90vw] w-[90vw]">
         <DialogHeader>
           <DialogTitle class="line-clamp-1">{{ take.prompt }}</DialogTitle>
         </DialogHeader>
-        <div v-if="videoSrc" class="flex justify-center">
-          <video
-            :src="videoSrc"
-            controls
-            autoplay
-            loop
-            class="max-h-[70vh] rounded"
-          />
+
+        <div class="grid grid-cols-2 gap-3">
+          <!-- Top-left: Take output (master) -->
+          <div class="text-center">
+            <p class="mb-1.5 text-xs font-medium text-muted-foreground">Take</p>
+            <video
+              v-if="videoSrc"
+              ref="takeVideoRef"
+              :src="videoSrc"
+              controls
+              autoplay
+              loop
+              class="max-h-[40vh] w-full rounded object-contain"
+            />
+          </div>
+
+          <!-- Top-right: Canny guidance -->
+          <div class="text-center">
+            <p class="mb-1.5 text-xs font-medium text-muted-foreground">Canny Guidance</p>
+            <video
+              v-if="cannySrc"
+              ref="cannyVideoRef"
+              :src="cannySrc"
+              muted
+              playsinline
+              loop
+              class="max-h-[40vh] w-full rounded object-contain"
+            />
+            <div v-else class="flex h-40 items-center justify-center rounded bg-muted">
+              <p class="text-xs text-muted-foreground">Not available</p>
+            </div>
+          </div>
+
+          <!-- Bottom-left: Original cut -->
+          <div class="text-center">
+            <p class="mb-1.5 text-xs font-medium text-muted-foreground">Original Cut</p>
+            <video
+              v-if="cutVideoSrc"
+              ref="cutVideoRef"
+              :src="cutVideoSrc"
+              muted
+              playsinline
+              loop
+              class="max-h-[40vh] w-full rounded object-contain"
+            />
+            <div v-else class="flex h-40 items-center justify-center rounded bg-muted">
+              <p class="text-xs text-muted-foreground">Not available</p>
+            </div>
+          </div>
+
+          <!-- Bottom-right: Style image -->
+          <div class="text-center">
+            <p class="mb-1.5 text-xs font-medium text-muted-foreground">Style Image</p>
+            <img
+              v-if="generationImgSrc"
+              :src="generationImgSrc"
+              alt="Style reference"
+              class="max-h-[40vh] w-full rounded object-contain"
+            />
+            <div v-else class="flex h-40 items-center justify-center rounded bg-muted">
+              <p class="text-xs text-muted-foreground">Not available</p>
+            </div>
+          </div>
         </div>
       </DialogContent>
     </Dialog>

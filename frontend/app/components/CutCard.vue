@@ -153,6 +153,7 @@ async function handleDelete() {
       :cut-id="cut.id"
       :cut-width="cut.width"
       :cut-height="cut.height"
+      :cut-file-path="cut.file_path"
     />
   </div>
 </template>

@@ -7,6 +7,8 @@ const props = defineProps<{
   projectId: string
   cutId: string
   generationId: string
+  cutFilePath: string | null
+  generationImagePath: string | null
 }>()
 
 const formOpen = ref(false)
@@ -56,6 +58,8 @@ function openFromTake(take: Take) {
         :project-id="projectId"
         :cut-id="cutId"
         :generation-id="generationId"
+        :cut-file-path="cutFilePath"
+        :generation-image-path="generationImagePath"
         @regenerate="openFromTake"
       />
     </div>
