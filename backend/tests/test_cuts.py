@@ -13,6 +13,14 @@ def _make_project(db, name="Test Project"):
     return project
 
 
+def _make_narration_project(db, name="Narration Project"):
+    project = Project(name=name, project_type="narration")
+    db.add(project)
+    db.commit()
+    db.refresh(project)
+    return project
+
+
 def _make_cut(db, project, order=0, filename="cut_01.mp4"):
     cut = Cut(
         project_id=project.id,
@@ -134,3 +142,12 @@ def test_upload_to_nonexistent_project(client):
         files=files,
     )
     assert resp.status_code == 404
+
+
+def test_upload_cuts_to_narration_project_returns_400(client, db):
+    project = _make_narration_project(db)
+    file_content = b"fake video content"
+    files = [("files", ("cut_01.mp4", io.BytesIO(file_content), "video/mp4"))]
+
+    resp = client.post(f"/api/v1/projects/{project.id}/cuts", files=files)
+    assert resp.status_code == 400

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { Film, Trash2 } from 'lucide-vue-next'
+import { Film, Mic2, Trash2 } from 'lucide-vue-next'
 import type { Project } from '~/types'
 
 const props = defineProps<{
@@ -31,6 +31,16 @@ function formatDate(dateStr: string) {
     year: 'numeric',
   })
 }
+
+const typeLabel = computed(() =>
+  props.project.project_type === 'narration' ? 'Narration' : 'Video-to-video',
+)
+
+const itemCountLabel = computed(() =>
+  props.project.project_type === 'narration'
+    ? `${props.project.segment_count ?? 0} segments`
+    : `${props.project.cut_count ?? 0} cuts`,
+)
 </script>
 
 <template>
@@ -48,6 +58,9 @@ function formatDate(dateStr: string) {
         <CardDescription v-if="project.description">
           {{ project.description }}
         </CardDescription>
+        <div class="text-xs uppercase tracking-wide text-muted-foreground">
+          {{ typeLabel }}
+        </div>
       </div>
       <Button
         variant="ghost"
@@ -62,8 +75,9 @@ function formatDate(dateStr: string) {
     <CardContent>
       <div class="flex items-center gap-4 text-sm text-muted-foreground">
         <span class="flex items-center gap-1">
-          <Film class="h-4 w-4" />
-          {{ project.cut_count ?? 0 }} cuts
+          <Film v-if="project.project_type === 'video_to_video'" class="h-4 w-4" />
+          <Mic2 v-else class="h-4 w-4" />
+          {{ itemCountLabel }}
         </span>
         <span>Created {{ formatDate(project.created_at) }}</span>
       </div>

@@ -1,0 +1,3 @@
+[S1] Hi, I want to share a project I've been building called What Are You Working On?, or waywo for short.
+[S1] Waywo takes the monthly "What are you working on?" threads from Hacker News and turns them into a clean, semantically searchable database of real projects people are building.
+[S1] At a high level, it's a smart directory for interesting products, experiments, and ideas shared openly by the Hacker News community.

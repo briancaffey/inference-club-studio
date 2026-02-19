@@ -1,5 +1,6 @@
 <script setup lang="ts">
 const route = useRoute()
+const servicesStore = useServicesStore()
 
 const navLinks = [
   { label: 'Home', to: '/' },
@@ -12,12 +13,21 @@ function isActive(to: string) {
   if (to === '/') return route.path === '/'
   return route.path.startsWith(to)
 }
+
+onMounted(() => {
+  void servicesStore.fetchHealth()
+  servicesStore.startPolling()
+})
+
+onUnmounted(() => {
+  servicesStore.stopPolling()
+})
 </script>
 
 <template>
   <div class="flex min-h-screen flex-col bg-background text-foreground">
     <header class="sticky top-0 z-50 w-full border-b bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60">
-      <div class="container flex h-14 items-center justify-between px-4">
+      <div class="container mx-auto flex h-14 items-center justify-between px-4">
         <div class="flex items-center gap-6">
           <NuxtLink to="/" class="text-lg font-semibold">
             Inference Club Studio
@@ -39,12 +49,13 @@ function isActive(to: string) {
           </nav>
         </div>
         <div class="flex items-center gap-2">
+          <ServicesNavIndicator />
           <ThemePicker />
         </div>
       </div>
     </header>
 
-    <main class="container flex-1 px-4 py-6">
+    <main class="container mx-auto flex-1 px-4 py-6">
       <slot />
     </main>
 

@@ -1,5 +1,5 @@
 import { defineStore } from 'pinia'
-import type { Cut, Project } from '~/types'
+import type { Cut, Project, ProjectType } from '~/types'
 
 export const useProjectsStore = defineStore('projects', () => {
   const { baseURL } = useApi()
@@ -35,12 +35,16 @@ export const useProjectsStore = defineStore('projects', () => {
     }
   }
 
-  async function createProject(name: string, description?: string) {
+  async function createProject(
+    name: string,
+    description?: string,
+    projectType: ProjectType = 'video_to_video',
+  ) {
     error.value = null
     try {
       const data = await $fetch<Project>(`${baseURL}/api/v1/projects`, {
         method: 'POST',
-        body: { name, description },
+        body: { name, description, project_type: projectType },
       })
       projects.value.unshift(data)
       return data

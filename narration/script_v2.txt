@@ -1,0 +1,28 @@
+One of my favorite corners of the Internet is a series of monthly posts on Hacker News called "What are you working on?"
+People share their side projects, passion projects, web apps, and a wide variety of fascinating work.
+I built Waywo as a tool to catalog, index, and research all of these projects, and I built it to run entirely locally using open models from NVIDIA.
+The NVIDIA Nemotron family provides a complete set of tools for building agentic applications.
+For language, there is Nemotron Nano, a compact model with strong reasoning that handles LLM inference throughout the system.
+For retrieval, we use a Nemotron embedding model and a Nemotron rerank model to power retrieval augmented generation.
+And for voice, NVIDIA Magpie handles speech synthesis while a Nemotron speech model handles voice recognition.
+Waywo ingests projects from Hacker News using their public Firebase API, then processes each post through a series of steps in a LlamaIndex workflow.
+Raw text submissions are cleaned, split into separate projects, researched, scored, tagged, and summarized by the Nemotron Nano model.
+Repeat entries are deduplicated and low-effort responses are filtered out, so only substantive projects make it through.
+An embedding for each project is created using the Nemotron embedding service, capturing a general understanding of what the project is about.
+These embeddings power semantic search, reranking, agentic conversational chat, and advanced visualizations.
+For semantic search, your search terms are transformed into embeddings and compared against all projects using distance metrics.
+The most similar projects are then reranked using a model specifically tuned for reordering results by query relevance.
+Nemotron Nano, with its strong reasoning capabilities, then gives you a high quality answer with references to the projects found during retrieval.
+These same retrieval mechanisms power an agentic chatbot assistant that can answer any question about projects people have submitted.
+The assistant uses retrieval augmented generation with vector embeddings inside a ReAct agent to find and reason about relevant projects.
+A safety guardrail model keeps conversations focused on project information retrieval and blocks unrelated messages.
+Waywo also supports full voice-to-voice interaction through a voice assistant.
+Your speech is transcribed in real time by the Nemotron speech recognition model, and the response is read back to you using Magpie speech synthesis.
+The result is a seamless, fully local, voice-to-voice agent experience.
+Waywo can even produce short-form videos, directed by Nemotron, and narrated and captioned using the speech synthesis and voice recognition models.
+The embeddings also enable advanced visualizations using techniques like UMAP and HDBSCAN.
+These methods collapse high-dimensional embeddings into a two-dimensional space with meaningful clusters, letting you visually explore the landscape of what people are building.
+Seeing so many projects from people all over the world can be genuinely inspiring.
+And if you are struggling to come up with your own idea, Waywo can help you generate project concepts using the NeMo Data Designer.
+This state-of-the-art data generation library produces high quality project descriptions based on your inputs, all powered by Nemotron Nano.
+So go explore what the world is working on, and maybe find the spark for your next project.

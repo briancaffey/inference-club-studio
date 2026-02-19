@@ -1,0 +1,16 @@
+# Output files
+output/
+
+# Database
+narration.db
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+
+# uv
+uv.lock
+
+# Sample audio (keep text.txt)
+# sample/*.wav

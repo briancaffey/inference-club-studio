@@ -1,0 +1,53 @@
+[S1] Hi, I want to share a project I've been building called What Are You Working On?, or waywo for short.
+
+[S1] Waywo takes the monthly "What are you working on?" threads from Hacker News and turns them into a clean, semantically searchable database of real projects people are building.
+
+[S1] At a high level, it's a smart directory for interesting products, experiments, and ideas shared openly by the Hacker News community.
+
+[S1] Here's how it works behind the scenes.
+
+[S1] First, we use the public Hacker News Firebase API to collect every monthly "What are you working on?" post.
+
+[S1] We then scrape and process every individual comment from those threads.
+
+[S1] Each comment is passed through an agent powered by open-source Nemotron models to determine whether it represents a real, substantive project worth including.
+
+[S1] For valid projects, we automatically generate a clean title, assign tags, and score the project based on its complexity and overall interest.
+
+[S1] We also analyze links included in the post and perform web searches using Firecrawl to gather additional context and project details.
+
+[S1] All of this enriched project data is summarized using Nemotron language models.
+
+[S1] Those summaries are then converted into embeddings using a Nemotron embedding model.
+
+[S1] We store the embeddings in Redis, which acts as our vector database for fast semantic search.
+
+[S1] Along the way, additional LLM checks remove duplicates and filter out irrelevant or low-quality entries.
+
+[S1] Once processing is complete, the Waywo database is ready to be queried using retrieval-augmented generation.
+
+[S1] When you ask a question, an agent decides whether it needs to retrieve relevant projects from the vector store.
+
+[S1] It fetches similar projects using embedding similarity and then applies a Nemotron rerank model to find the most relevant results.
+
+[S1] Those results are used to generate a clear, contextual answer about what people are building in a given technology or domain.
+
+[S1] You can interact with Waywo using your natural voice.
+
+[S1] Speech is transcribed live using the Nemotron speech service, enabling seamless voice input.
+
+[S1] After retrieval and reasoning, the system reads the answer back using Nemotron's multilingual text-to-speech service.
+
+[S1] The result is a fully round-trip, voice-to-voice agent experience.
+
+[S1] Under the hood, Waywo is powered by LlamaIndex and the NeMo Agent Toolkit.
+
+[S1] NeMo handles agentic workflows, observability, evaluations, and model orchestration, while LlamaIndex drives retrieval and reasoning.
+
+[S1] Waywo also includes an idea generator powered by the NeMo Data Designer.
+
+[S1] This tool uses language models to generate diverse, realistic ideas for products, companies, or other creative entities.
+
+[S1] Ultimately, Waywo is designed to inspire builders by showing what others are creating in the open.
+
+[S1] And now, the only real question left to ask is: what are you working on?

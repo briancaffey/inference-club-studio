@@ -1,0 +1,2580 @@
+<!DOCTYPE html>
+<html lang="en" class="h-full">
+<head>
+  <meta charset="UTF-8">
+  <!-- Prevent flash of wrong theme -->
+  <script>
+    if (localStorage.getItem('theme') === 'dark' || (!localStorage.getItem('theme') && window.matchMedia('(prefers-color-scheme: dark)').matches)) {
+      document.documentElement.classList.add('dark');
+    }
+  </script>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Narration</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          colors: {
+            surface: { 50: '#f8fafc', 100: '#f1f5f9', 200: '#e2e8f0', 300: '#cbd5e1', 800: '#1e293b', 900: '#0f172a' },
+          }
+        }
+      }
+    }
+  </script>
+  <style>
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .spinner { animation: spin 0.7s linear infinite; }
+    [v-cloak] { display: none; }
+    /* Drag styles */
+    .drag-over { border-top: 2px solid #6366f1 !important; }
+    .dragging { opacity: 0.35; }
+    /* Smooth transitions */
+    .fade-enter-active, .fade-leave-active { transition: opacity 0.2s; }
+    .fade-enter-from, .fade-leave-to { opacity: 0; }
+    /* Trim handle cursors */
+    .trim-handle { cursor: ew-resize; }
+    /* Timeline waveform canvases */
+    canvas[id^="waveform-"] { display: block; width: 100%; height: 100%; }
+    /* Hide scrollbar on timeline but keep scrolling */
+    .timeline-scroll::-webkit-scrollbar { display: none; }
+    .timeline-scroll { -ms-overflow-style: none; scrollbar-width: none; }
+  </style>
+</head>
+<body class="bg-gray-50 dark:bg-gray-900 text-gray-900 dark:text-gray-100 min-h-full transition-colors">
+  <div id="app" v-cloak>
+
+    <!-- Header -->
+    <header class="bg-white dark:bg-gray-800 border-b border-gray-200 dark:border-gray-700 sticky top-0 z-30 shadow-sm">
+      <div class="max-w-6xl mx-auto px-4 sm:px-6 py-3 flex items-center justify-between gap-4">
+        <div class="flex items-center gap-3">
+          <h1 class="text-lg font-bold text-gray-900 dark:text-gray-100 tracking-tight">Narration</h1>
+          <span class="text-xs text-gray-400 dark:text-gray-500 hidden sm:inline">Voice generation studio</span>
+        </div>
+
+        <!-- Project switcher + dark mode toggle -->
+        <div class="flex items-center gap-2">
+          <select v-model="currentProjectId" @change="switchProject"
+            class="text-sm border border-gray-300 dark:border-gray-600 rounded-lg px-3 py-1.5 bg-white dark:bg-gray-700 dark:text-gray-100 focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none min-w-[180px]">
+            <option v-for="p in projects" :key="p.id" :value="p.id">{{ p.name }}</option>
+          </select>
+          <button @click="showNewProject = !showNewProject"
+            class="text-sm px-3 py-1.5 rounded-lg border border-gray-300 dark:border-gray-600 hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors"
+            :class="showNewProject ? 'bg-gray-100 dark:bg-gray-700' : ''">
+            {{ showNewProject ? 'Cancel' : '+ New' }}
+          </button>
+          <button v-if="currentProjectId" @click="deleteProject"
+            class="text-sm px-3 py-1.5 rounded-lg transition-colors"
+            :class="confirmDeleteProject ? 'bg-red-500 text-white hover:bg-red-600' : 'border border-gray-300 dark:border-gray-600 text-gray-500 dark:text-gray-400 hover:bg-red-50 dark:hover:bg-red-900/30 hover:text-red-600 dark:hover:text-red-400 hover:border-red-300 dark:hover:border-red-700'">
+            {{ confirmDeleteProject ? 'Confirm delete' : 'Delete' }}
+          </button>
+          <!-- Dark mode toggle -->
+          <button @click="toggleDark" class="text-sm p-1.5 rounded-lg border border-gray-300 dark:border-gray-600 hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors" title="Toggle dark mode">
+            <svg v-if="!darkMode" class="w-4 h-4 text-gray-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M21.752 15.002A9.718 9.718 0 0118 15.75c-5.385 0-9.75-4.365-9.75-9.75 0-1.33.266-2.597.748-3.752A9.753 9.753 0 003 11.25C3 16.635 7.365 21 12.75 21a9.753 9.753 0 009.002-5.998z"/>
+            </svg>
+            <svg v-else class="w-4 h-4 text-yellow-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M12 3v2.25m6.364.386l-1.591 1.591M21 12h-2.25m-.386 6.364l-1.591-1.591M12 18.75V21m-4.773-4.227l-1.591 1.591M5.25 12H3m4.227-4.773L5.636 5.636M15.75 12a3.75 3.75 0 11-7.5 0 3.75 3.75 0 017.5 0z"/>
+            </svg>
+          </button>
+        </div>
+      </div>
+    </header>
+
+    <main class="max-w-6xl mx-auto px-4 sm:px-6 py-6">
+
+      <!-- Status bar -->
+      <div v-if="status" class="mb-4 rounded-lg text-sm font-medium overflow-hidden"
+        :class="status.includes('failed') || status.includes('Failed') || status.includes('error') ? 'bg-red-50 dark:bg-red-900/30 text-red-700 dark:text-red-400 border border-red-200 dark:border-red-800' : 'bg-indigo-50 dark:bg-indigo-900/30 text-indigo-700 dark:text-indigo-300 border border-indigo-200 dark:border-indigo-800'">
+        <div class="flex items-center gap-2 px-4 py-2.5">
+          <svg v-if="generating" class="w-4 h-4 spinner text-indigo-500 shrink-0" viewBox="0 0 24 24" fill="none">
+            <circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="3" class="opacity-25"/>
+            <path d="M12 2a10 10 0 019.95 9" stroke="currentColor" stroke-width="3" stroke-linecap="round"/>
+          </svg>
+          <span class="flex-1">{{ status }}</span>
+          <span v-if="genEstimate" class="text-xs opacity-70">~{{ genEstimate }}s</span>
+        </div>
+        <div v-if="generating && genTotal > 0" class="h-1 bg-indigo-100 dark:bg-indigo-900/50">
+          <div class="h-full bg-indigo-500 transition-all duration-300" :style="{ width: genProgress + '%' }"></div>
+        </div>
+      </div>
+
+      <!-- New project form -->
+      <div v-if="showNewProject" class="mb-4 flex gap-2">
+        <input v-model="newProjectName" placeholder="Project name..."
+          class="flex-1 text-sm border border-gray-300 dark:border-gray-600 rounded-lg px-3 py-2 bg-white dark:bg-gray-800 dark:text-gray-100 focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none"
+          @keyup.enter="createProject">
+        <button @click="createProject" :disabled="!newProjectName.trim()"
+          class="text-sm px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 disabled:opacity-40 disabled:cursor-not-allowed transition-colors font-medium">
+          Create Project
+        </button>
+      </div>
+
+      <template v-if="currentProjectId">
+
+        <!-- Summary bar -->
+        <div v-if="segments.length" class="flex items-center gap-4 mb-3 text-xs text-gray-500 dark:text-gray-400">
+          <span class="flex items-center gap-1">
+            <span class="inline-block w-2 h-2 rounded-full bg-gray-300 dark:bg-gray-600"></span>
+            {{ segments.length }} segments
+          </span>
+          <span class="flex items-center gap-1">
+            <span class="inline-block w-2 h-2 rounded-full bg-emerald-400"></span>
+            {{ doneCount }} done
+          </span>
+          <span v-if="pendingCount" class="flex items-center gap-1">
+            <span class="inline-block w-2 h-2 rounded-full bg-amber-400"></span>
+            {{ pendingCount }} pending
+          </span>
+          <span v-if="errorCount" class="flex items-center gap-1">
+            <span class="inline-block w-2 h-2 rounded-full bg-red-400"></span>
+            {{ errorCount }} failed
+          </span>
+          <span class="font-medium text-gray-700 dark:text-gray-300">{{ totalDuration }}</span>
+        </div>
+
+        <!-- Toolbar -->
+        <div class="flex flex-wrap items-center gap-2 mb-4">
+          <button @click="toggleImport"
+            class="text-sm px-3 py-1.5 rounded-lg border border-gray-300 dark:border-gray-600 hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors"
+            :class="showImport ? 'bg-gray-100 dark:bg-gray-700 border-gray-400 dark:border-gray-500' : ''">
+            {{ showImport ? 'Cancel' : 'Import' }}
+          </button>
+          <button @click="showAddSegment = !showAddSegment" :disabled="generating"
+            class="text-sm px-3 py-1.5 rounded-lg border border-gray-300 dark:border-gray-600 hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors disabled:opacity-40">
+            {{ showAddSegment ? 'Cancel' : '+ Add Segment' }}
+          </button>
+          <button v-if="!generating" @click="generateAll" :disabled="segments.length === 0"
+            class="text-sm px-4 py-1.5 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 disabled:opacity-40 disabled:cursor-not-allowed transition-colors font-medium">
+            Generate All
+          </button>
+          <button v-else @click="cancelGeneration"
+            class="text-sm px-4 py-1.5 rounded-lg font-medium transition-colors"
+            :class="cancelling ? 'bg-gray-400 text-white cursor-not-allowed' : 'bg-red-500 text-white hover:bg-red-600'">
+            {{ cancelling ? 'Cancelling...' : 'Cancel' }}
+          </button>
+          <button v-if="errorCount > 0 && !generating" @click="retryFailed"
+            class="text-sm px-3 py-1.5 rounded-lg border border-red-300 dark:border-red-700 text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-900/30 transition-colors font-medium">
+            Retry {{ errorCount }} Failed
+          </button>
+          <button @click="showExport = !showExport" :disabled="!hasAudio"
+            class="text-sm px-3 py-1.5 rounded-lg border border-gray-300 dark:border-gray-600 hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors disabled:opacity-40"
+            :class="showExport ? 'bg-gray-100 dark:bg-gray-700 border-gray-400 dark:border-gray-500' : ''">
+            {{ showExport ? 'Hide Export' : 'Export' }}
+          </button>
+          <button v-if="segments.length" @click="clearAllSegments" :disabled="generating"
+            class="text-sm px-3 py-1.5 rounded-lg transition-colors"
+            :class="confirmClear ? 'bg-red-500 text-white hover:bg-red-600' : 'border border-gray-300 dark:border-gray-600 text-gray-500 dark:text-gray-400 hover:bg-red-50 dark:hover:bg-red-900/30 hover:text-red-600 dark:hover:text-red-400 hover:border-red-300 dark:hover:border-red-700'">
+            {{ confirmClear ? 'Confirm clear all' : 'Clear All' }}
+          </button>
+          <button v-if="segments.length" @click="toggleScriptEditor" :disabled="generating"
+            class="text-sm px-3 py-1.5 rounded-lg border border-gray-300 dark:border-gray-600 hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors disabled:opacity-40"
+            :class="showScriptEditor ? 'bg-gray-100 dark:bg-gray-700 border-gray-400 dark:border-gray-500' : ''">
+            {{ showScriptEditor ? 'Close Editor' : 'Edit Script' }}
+          </button>
+          <button v-if="segments.length" @click="toggleTimeline"
+            class="text-sm px-3 py-1.5 rounded-lg border border-gray-300 dark:border-gray-600 hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors"
+            :class="showTimeline ? 'bg-gray-100 dark:bg-gray-700 border-gray-400 dark:border-gray-500' : ''">
+            {{ showTimeline ? 'Hide Timeline' : 'Timeline' }}
+          </button>
+          <button @click="showVoices = !showVoices"
+            class="text-sm px-3 py-1.5 rounded-lg border border-gray-300 dark:border-gray-600 hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors"
+            :class="showVoices ? 'bg-gray-100 dark:bg-gray-700 border-gray-400 dark:border-gray-500' : ''">
+            {{ showVoices ? 'Hide Voices' : 'Voices' }}
+          </button>
+          <button v-if="hasAudio" @click="transcribeAll" :disabled="transcribeAllProgress !== null"
+            class="text-sm px-3 py-1.5 rounded-lg border border-purple-300 dark:border-purple-700 text-purple-600 dark:text-purple-400 hover:bg-purple-50 dark:hover:bg-purple-900/20 disabled:opacity-40 transition-colors font-medium flex items-center gap-1.5">
+            <svg v-if="transcribeAllProgress !== null" class="w-3.5 h-3.5 spinner" viewBox="0 0 24 24" fill="none">
+              <circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="3" class="opacity-25"/>
+              <path d="M12 2a10 10 0 019.95 9" stroke="currentColor" stroke-width="3" stroke-linecap="round"/>
+            </svg>
+            {{ transcribeAllProgress !== null ? 'Transcribing...' : 'Transcribe All' }}
+          </button>
+
+          <!-- Global voice selectors -->
+          <div class="flex items-center gap-1.5 border-l border-gray-200 dark:border-gray-700 pl-2 ml-1">
+            <span class="text-xs text-gray-400 dark:text-gray-500">Voice:</span>
+            <select v-if="voiceSamples.length" v-model="globalVoiceSampleId"
+              class="text-xs border border-gray-200 dark:border-gray-600 rounded-md px-1.5 py-1 bg-white dark:bg-gray-700 dark:text-gray-200 focus:ring-1 focus:ring-indigo-500 outline-none max-w-[100px]"
+              title="Dia voice sample">
+              <option :value="null">dia default</option>
+              <option v-for="vs in voiceSamples" :key="vs.id" :value="vs.id">{{ vs.name }}</option>
+            </select>
+            <select v-if="magpieVoices.length" v-model="globalMagpieVoice"
+              class="text-xs border border-gray-200 dark:border-gray-600 rounded-md px-1.5 py-1 bg-white dark:bg-gray-700 dark:text-gray-200 focus:ring-1 focus:ring-indigo-500 outline-none max-w-[120px]"
+              title="Magpie voice">
+              <option value="">magpie default</option>
+              <option v-for="v in magpieVoices" :key="v" :value="v">{{ v.split('.').pop() }}</option>
+            </select>
+          </div>
+
+          <div class="ml-auto flex items-center gap-1.5">
+            <span class="text-xs text-gray-400 dark:text-gray-500">Speed</span>
+            <input type="range" v-model.number="playbackSpeed" min="0.5" max="3" step="0.05"
+              class="w-20 h-1 accent-indigo-500 cursor-pointer" @dblclick="playbackSpeed = 1">
+            <span class="text-xs font-mono w-8 text-right"
+              :class="playbackSpeed !== 1 ? 'text-indigo-600 dark:text-indigo-400' : 'text-gray-400 dark:text-gray-500'">{{ playbackSpeed.toFixed(1) }}x</span>
+          </div>
+        </div>
+
+        <!-- Voice samples panel -->
+        <div v-if="showVoices" class="mb-4 bg-white dark:bg-gray-800 rounded-xl border border-gray-200 dark:border-gray-700 p-4 shadow-sm">
+          <h3 class="text-sm font-semibold text-gray-700 dark:text-gray-300 mb-3">Voice Samples (Dia)</h3>
+
+          <!-- Existing samples -->
+          <div v-if="voiceSamples.length" class="space-y-2 mb-3">
+            <div v-for="vs in voiceSamples" :key="vs.id"
+              class="flex items-center gap-2 py-1.5 px-2 rounded-lg border border-gray-100 dark:border-gray-700 bg-gray-50 dark:bg-gray-900/30">
+              <span class="text-sm font-medium text-gray-700 dark:text-gray-300 min-w-[80px]">{{ vs.name }}</span>
+              <span class="text-xs text-gray-400 dark:text-gray-500 truncate flex-1" :title="vs.transcript">{{ vs.transcript || 'No transcript' }}</span>
+              <audio :src="'/api/voice-samples/' + vs.id + '/audio'" controls preload="none" class="max-w-[150px]" style="height:28px;"></audio>
+              <button @click="deleteVoiceSample(vs.id)"
+                class="text-xs px-1.5 py-0.5 rounded transition-colors"
+                :class="confirmDeleteVs === vs.id ? 'bg-red-500 text-white' : 'border border-gray-200 dark:border-gray-600 text-gray-400 hover:text-red-500 dark:hover:text-red-400 hover:border-red-300 dark:hover:border-red-700'">
+                {{ confirmDeleteVs === vs.id ? 'Sure?' : '\u00d7' }}
+              </button>
+            </div>
+          </div>
+          <div v-else class="text-xs text-gray-400 dark:text-gray-500 mb-3">No voice samples yet.</div>
+
+          <!-- Upload form -->
+          <div class="flex flex-wrap items-end gap-2 pt-2 border-t border-gray-100 dark:border-gray-700">
+            <div class="flex flex-col gap-1">
+              <label class="text-xs text-gray-500 dark:text-gray-400">Name</label>
+              <input v-model="vsName" placeholder="Voice name..."
+                class="text-sm border border-gray-300 dark:border-gray-600 rounded-lg px-2.5 py-1.5 bg-white dark:bg-gray-700 dark:text-gray-100 focus:ring-2 focus:ring-indigo-500 outline-none w-32">
+            </div>
+            <div class="flex flex-col gap-1">
+              <label class="text-xs text-gray-500 dark:text-gray-400">Transcript</label>
+              <input v-model="vsTranscript" placeholder="Reference text..."
+                class="text-sm border border-gray-300 dark:border-gray-600 rounded-lg px-2.5 py-1.5 bg-white dark:bg-gray-700 dark:text-gray-100 focus:ring-2 focus:ring-indigo-500 outline-none w-64">
+            </div>
+            <div class="flex flex-col gap-1">
+              <label class="text-xs text-gray-500 dark:text-gray-400">WAV File</label>
+              <input type="file" accept=".wav" ref="vsFileInput"
+                class="text-sm text-gray-500 dark:text-gray-400 file:mr-2 file:py-1 file:px-2.5 file:rounded-md file:border file:border-gray-300 dark:file:border-gray-600 file:text-xs file:bg-white dark:file:bg-gray-700 dark:file:text-gray-300 file:cursor-pointer">
+            </div>
+            <button @click="uploadVoiceSample" :disabled="!vsName.trim()"
+              class="text-sm px-3 py-1.5 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 disabled:opacity-40 transition-colors font-medium">
+              Upload
+            </button>
+          </div>
+
+          <!-- Magpie voices -->
+          <div class="mt-4 pt-3 border-t border-gray-100 dark:border-gray-700">
+            <div class="flex items-center gap-2 mb-2">
+              <h3 class="text-sm font-semibold text-gray-700 dark:text-gray-300">Magpie Voices</h3>
+              <button @click="fetchMagpieVoices" class="text-xs px-2 py-0.5 rounded border border-gray-200 dark:border-gray-600 text-gray-500 dark:text-gray-400 hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors">Refresh</button>
+            </div>
+            <div v-if="magpieVoices.length" class="flex flex-wrap gap-1.5">
+              <span v-for="v in magpieVoices" :key="v" class="text-xs px-2 py-1 rounded-md bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-300">{{ v }}</span>
+            </div>
+            <div v-else class="text-xs text-gray-400 dark:text-gray-500">Click Refresh to load available voices from Magpie.</div>
+          </div>
+        </div>
+
+        <!-- Import panel -->
+        <div v-if="showImport" class="mb-4 bg-white dark:bg-gray-800 rounded-xl border border-gray-200 dark:border-gray-700 p-4 shadow-sm">
+          <!-- Tab bar -->
+          <div class="flex gap-1 mb-3">
+            <button @click="importMode = 'script'"
+              class="text-sm px-3 py-1.5 rounded-lg font-medium transition-colors"
+              :class="importMode === 'script' ? 'bg-indigo-600 text-white' : 'bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-gray-600'">
+              Script
+            </button>
+            <button @click="importMode = 'article'"
+              class="text-sm px-3 py-1.5 rounded-lg font-medium transition-colors"
+              :class="importMode === 'article' ? 'bg-indigo-600 text-white' : 'bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-gray-600'">
+              Article
+            </button>
+          </div>
+
+          <!-- Script tab (unchanged) -->
+          <div v-if="importMode === 'script'">
+            <textarea v-model="importText" placeholder="Paste script here (one line per segment)..."
+              class="w-full text-sm border border-gray-300 dark:border-gray-600 rounded-lg px-3 py-2 font-mono bg-white dark:bg-gray-700 dark:text-gray-100 focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none resize-y min-h-[120px]"></textarea>
+            <div class="flex items-center gap-2 mt-3">
+              <select v-model="importService"
+                class="text-sm border border-gray-300 dark:border-gray-600 rounded-lg px-3 py-1.5 bg-white dark:bg-gray-700 dark:text-gray-100 focus:ring-2 focus:ring-indigo-500 outline-none">
+                <option value="dia">Dia (voice clone)</option>
+                <option value="magpie">Magpie (fast)</option>
+              </select>
+              <button @click="doImport" :disabled="!importText.trim()"
+                class="text-sm px-4 py-1.5 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 disabled:opacity-40 transition-colors font-medium">
+                Import
+              </button>
+            </div>
+          </div>
+
+          <!-- Article tab -->
+          <div v-if="importMode === 'article'">
+            <!-- Input state -->
+            <template v-if="!articleChunks.length">
+              <textarea v-model="articleText" placeholder="Paste a full article here. The LLM will split it into TTS-friendly segments, expand numbers, remove URLs, etc."
+                class="w-full text-sm border border-gray-300 dark:border-gray-600 rounded-lg px-3 py-2 bg-white dark:bg-gray-700 dark:text-gray-100 focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none resize-y min-h-[120px]"></textarea>
+              <div class="flex items-center gap-2 mt-3">
+                <select v-model="importService"
+                  class="text-sm border border-gray-300 dark:border-gray-600 rounded-lg px-3 py-1.5 bg-white dark:bg-gray-700 dark:text-gray-100 focus:ring-2 focus:ring-indigo-500 outline-none">
+                  <option value="dia">Dia (voice clone)</option>
+                  <option value="magpie">Magpie (fast)</option>
+                </select>
+                <button @click="processArticle" :disabled="!articleText.trim() || articleProcessing"
+                  class="text-sm px-4 py-1.5 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 disabled:opacity-40 transition-colors font-medium flex items-center gap-2">
+                  <svg v-if="articleProcessing" class="w-4 h-4 spinner" viewBox="0 0 24 24" fill="none">
+                    <circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="3" class="opacity-25"/>
+                    <path d="M12 2a10 10 0 019.95 9" stroke="currentColor" stroke-width="3" stroke-linecap="round"/>
+                  </svg>
+                  {{ articleProcessing ? 'Processing...' : 'Process Article' }}
+                </button>
+              </div>
+              <div v-if="articleStatus" class="mt-2 text-xs text-indigo-600 dark:text-indigo-400 flex items-center gap-2">
+                <svg class="w-3.5 h-3.5 spinner shrink-0" viewBox="0 0 24 24" fill="none">
+                  <circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="3" class="opacity-25"/>
+                  <path d="M12 2a10 10 0 019.95 9" stroke="currentColor" stroke-width="3" stroke-linecap="round"/>
+                </svg>
+                {{ articleStatus }}
+              </div>
+            </template>
+
+            <!-- Preview state: chunk-by-chunk comparison -->
+            <template v-else>
+              <!-- Header bar -->
+              <div class="text-xs text-gray-500 dark:text-gray-400 mb-2 flex items-center gap-2 flex-wrap">
+                <span>{{ articleSegmentsFlat.length }} segments</span>
+                <span class="text-gray-300 dark:text-gray-600">&middot;</span>
+                <span>{{ articleChunksProcessed }}/{{ articleChunks.length }} chunks processed</span>
+                <svg v-if="articleProcessing" class="w-3 h-3 spinner text-indigo-500" viewBox="0 0 24 24" fill="none">
+                  <circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="3" class="opacity-25"/>
+                  <path d="M12 2a10 10 0 019.95 9" stroke="currentColor" stroke-width="3" stroke-linecap="round"/>
+                </svg>
+                <button v-if="articleChunksErrorCount > 0 && !articleProcessing"
+                  @click="retryAllFailedChunks"
+                  class="ml-auto text-xs px-2 py-0.5 rounded border border-red-300 dark:border-red-700 text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-900/30 transition-colors font-medium">
+                  Retry {{ articleChunksErrorCount }} Failed
+                </button>
+              </div>
+
+              <!-- Column headers -->
+              <div class="grid grid-cols-2 gap-3 px-3 pb-1">
+                <div class="text-xs font-semibold text-gray-400 dark:text-gray-500 uppercase tracking-wide">Original</div>
+                <div class="text-xs font-semibold text-gray-400 dark:text-gray-500 uppercase tracking-wide">Processed</div>
+              </div>
+
+              <!-- Chunk list -->
+              <div class="max-h-[500px] overflow-y-auto border border-gray-200 dark:border-gray-700 rounded-lg divide-y divide-gray-100 dark:divide-gray-700">
+                <div v-for="(chunk, ci) in articleChunks" :key="ci"
+                  class="grid grid-cols-2 gap-3 p-3 transition-colors duration-300"
+                  :class="chunk.error ? 'bg-red-50/50 dark:bg-red-900/10' : !chunk.processed ? 'bg-amber-50/30 dark:bg-amber-900/5' : ''">
+
+                  <!-- Original (left) -->
+                  <div class="text-sm text-gray-400 dark:text-gray-500 leading-relaxed whitespace-pre-line">{{ chunk.raw }}</div>
+
+                  <!-- Processed (right) -->
+                  <div>
+                    <!-- Error state -->
+                    <div v-if="chunk.error" class="flex flex-col gap-2">
+                      <span class="text-xs text-red-500">Processing failed</span>
+                      <button @click="retryChunk(ci)" :disabled="chunk.retrying"
+                        class="self-start text-xs px-2 py-0.5 rounded border border-red-300 dark:border-red-700 text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-900/30 disabled:opacity-40 transition-colors font-medium flex items-center gap-1">
+                        <svg v-if="chunk.retrying" class="w-3 h-3 spinner" viewBox="0 0 24 24" fill="none">
+                          <circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="3" class="opacity-25"/>
+                          <path d="M12 2a10 10 0 019.95 9" stroke="currentColor" stroke-width="3" stroke-linecap="round"/>
+                        </svg>
+                        {{ chunk.retrying ? 'Retrying...' : 'Retry' }}
+                      </button>
+                    </div>
+
+                    <!-- Pending state -->
+                    <div v-else-if="!chunk.processed" class="text-sm text-gray-400 dark:text-gray-500 italic flex items-center gap-2">
+                      <svg class="w-3 h-3 spinner shrink-0" viewBox="0 0 24 24" fill="none">
+                        <circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="3" class="opacity-25"/>
+                        <path d="M12 2a10 10 0 019.95 9" stroke="currentColor" stroke-width="3" stroke-linecap="round"/>
+                      </svg>
+                      Processing...
+                    </div>
+
+                    <!-- Processed state (editable) -->
+                    <div v-else class="space-y-1.5">
+                      <div v-for="(seg, si) in chunk.segments" :key="si" class="flex gap-1 group">
+                        <textarea v-model="chunk.segments[si]" rows="1"
+                          @input="autoResizeTextarea($event)"
+                          @focus="autoResizeTextarea($event)"
+                          class="flex-1 text-sm bg-transparent border border-transparent hover:border-gray-200 dark:hover:border-gray-700 focus:border-indigo-300 dark:focus:border-indigo-700 focus:bg-white dark:focus:bg-gray-800 rounded px-1.5 py-0.5 text-gray-700 dark:text-gray-200 outline-none resize-none overflow-hidden transition-colors leading-relaxed"
+                          style="field-sizing: content;"></textarea>
+                        <button @click="removeArticleSegment(ci, si)"
+                          class="text-gray-300 dark:text-gray-600 hover:text-red-500 dark:hover:text-red-400 opacity-0 group-hover:opacity-100 transition-opacity shrink-0 text-sm px-0.5"
+                          title="Remove segment">&times;</button>
+                      </div>
+                      <button @click="retryChunk(ci)" :disabled="chunk.retrying"
+                        class="text-xs px-2 py-0.5 rounded border border-gray-200 dark:border-gray-700 text-gray-400 dark:text-gray-500 hover:text-indigo-600 dark:hover:text-indigo-400 hover:border-indigo-300 dark:hover:border-indigo-700 disabled:opacity-40 transition-colors flex items-center gap-1">
+                        <svg v-if="chunk.retrying" class="w-3 h-3 spinner" viewBox="0 0 24 24" fill="none">
+                          <circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="3" class="opacity-25"/>
+                          <path d="M12 2a10 10 0 019.95 9" stroke="currentColor" stroke-width="3" stroke-linecap="round"/>
+                        </svg>
+                        {{ chunk.retrying ? 'Rebuilding...' : 'Rebuild' }}
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <!-- Action buttons -->
+              <div class="flex items-center gap-2 mt-3">
+                <button @click="articleChunks = []; articleSegments = []"
+                  class="text-sm px-3 py-1.5 rounded-lg border border-gray-300 dark:border-gray-600 hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors">
+                  Back
+                </button>
+                <button @click="acceptArticleSegments"
+                  class="text-sm px-4 py-1.5 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 transition-colors font-medium">
+                  Accept & Import {{ articleSegmentsFlat.length }} Segments
+                </button>
+              </div>
+            </template>
+          </div>
+        </div>
+
+        <!-- Export options panel -->
+        <div v-if="showExport" class="mb-4 bg-white dark:bg-gray-800 rounded-xl border border-gray-200 dark:border-gray-700 p-4 shadow-sm">
+          <h3 class="text-sm font-semibold text-gray-700 dark:text-gray-300 mb-3">Export Options</h3>
+          <div class="flex flex-wrap items-end gap-4">
+            <div class="flex flex-col gap-1">
+              <label class="text-xs text-gray-500 dark:text-gray-400">Format</label>
+              <select v-model="exportFormat"
+                class="text-sm border border-gray-300 dark:border-gray-600 rounded-lg px-2.5 py-1.5 bg-white dark:bg-gray-700 dark:text-gray-100 focus:ring-2 focus:ring-indigo-500 outline-none">
+                <option value="wav">WAV</option>
+                <option value="mp3">MP3</option>
+              </select>
+            </div>
+            <div class="flex flex-col gap-1">
+              <label class="text-xs text-gray-500 dark:text-gray-400">Gap between segments</label>
+              <select v-model="exportGapMs"
+                class="text-sm border border-gray-300 dark:border-gray-600 rounded-lg px-2.5 py-1.5 bg-white dark:bg-gray-700 dark:text-gray-100 focus:ring-2 focus:ring-indigo-500 outline-none">
+                <option value="0">None</option>
+                <option value="250">0.25s</option>
+                <option value="500">0.5s</option>
+                <option value="750">0.75s</option>
+                <option value="1000">1.0s</option>
+                <option value="1500">1.5s</option>
+                <option value="2000">2.0s</option>
+              </select>
+            </div>
+            <div class="flex flex-col gap-1">
+              <label class="text-xs text-gray-500 dark:text-gray-400">Fade in/out</label>
+              <select v-model="exportFadeMs"
+                class="text-sm border border-gray-300 dark:border-gray-600 rounded-lg px-2.5 py-1.5 bg-white dark:bg-gray-700 dark:text-gray-100 focus:ring-2 focus:ring-indigo-500 outline-none">
+                <option value="0">None</option>
+                <option value="25">25ms</option>
+                <option value="50">50ms</option>
+                <option value="100">100ms</option>
+                <option value="200">200ms</option>
+              </select>
+            </div>
+            <label class="flex items-center gap-2 cursor-pointer">
+              <input type="checkbox" v-model="exportNormalize" class="rounded border-gray-300 dark:border-gray-600 text-indigo-600 focus:ring-indigo-500">
+              <span class="text-sm text-gray-700 dark:text-gray-300">Normalize</span>
+            </label>
+            <button @click="exportAudio"
+              class="text-sm px-4 py-1.5 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 transition-colors font-medium">
+              Download {{ exportFormat.toUpperCase() }}
+            </button>
+          </div>
+        </div>
+
+        <!-- Script Editor panel -->
+        <div v-if="showScriptEditor" class="mb-4 bg-white dark:bg-gray-800 rounded-xl border border-gray-200 dark:border-gray-700 p-4 shadow-sm">
+          <div class="flex items-center justify-between mb-3">
+            <h3 class="text-sm font-semibold text-gray-700 dark:text-gray-300">Script Editor</h3>
+            <span class="text-xs text-gray-400 dark:text-gray-500">{{ scriptLines.length }} lines</span>
+          </div>
+
+          <div class="max-h-[500px] overflow-y-auto border border-gray-200 dark:border-gray-700 rounded-lg divide-y divide-gray-100 dark:divide-gray-700">
+            <div v-for="(line, idx) in scriptLines" :key="idx"
+              class="flex items-start gap-2 px-3 py-2 group"
+              :class="[
+                line.text.length > 300 ? 'border-l-2 border-l-red-400' : line.text.length > 200 ? 'border-l-2 border-l-amber-400' : '',
+              ]">
+              <!-- Position number -->
+              <span class="w-6 text-center text-xs font-bold text-gray-400 dark:text-gray-500 shrink-0 pt-2">{{ idx + 1 }}</span>
+
+              <!-- Editable text -->
+              <textarea v-model="line.text" rows="2"
+                class="flex-1 text-sm border border-gray-200 dark:border-gray-600 rounded-md px-2.5 py-1.5 bg-white dark:bg-gray-700 dark:text-gray-100 focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none resize-y min-h-[2.5rem]"
+                :class="line.text.length > 300 ? 'border-red-300 dark:border-red-700' : line.text.length > 200 ? 'border-amber-300 dark:border-amber-700' : ''"></textarea>
+
+              <!-- Stats -->
+              <div class="flex items-center gap-2 shrink-0 text-xs text-gray-400 dark:text-gray-500 tabular-nums">
+                <span :class="line.text.length > 300 ? 'text-red-500' : line.text.length > 200 ? 'text-amber-500' : ''" :title="line.text.length + ' chars'">{{ line.text.length }}c</span>
+                <span :title="scriptLineWords(line.text) + ' words'">{{ scriptLineWords(line.text) }}w</span>
+                <span :title="'~' + scriptLineEstDuration(line.text) + 's'">~{{ scriptLineEstDuration(line.text) }}s</span>
+              </div>
+
+              <!-- Status dot -->
+              <span class="w-2 h-2 rounded-full shrink-0"
+                :class="{
+                  'bg-emerald-400': line.status === 'done',
+                  'bg-amber-400': line.status === 'pending' || line.status === 'generating',
+                  'bg-red-400': line.status === 'error',
+                  'bg-gray-300 dark:bg-gray-600': !line.status,
+                }"
+                :title="line.status || 'new'"></span>
+
+              <!-- Play button -->
+              <button v-if="line.audioPath" @click="playScriptLine(idx)" title="Play audio"
+                class="text-xs p-1 rounded-md border border-gray-200 dark:border-gray-600 text-gray-500 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors shrink-0">
+                <svg class="w-3.5 h-3.5" fill="currentColor" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
+              </button>
+
+              <!-- Split button -->
+              <button @click="splitScriptLine(idx)" title="Split at sentence boundary"
+                class="text-xs p-1 rounded-md border border-gray-200 dark:border-gray-600 text-gray-500 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors shrink-0"
+                :disabled="line.text.length < 20">
+                <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M7 21l-3-3 3-3M17 3l3 3-3 3M5 18h14M5 6h14"/></svg>
+              </button>
+
+              <!-- Remove button -->
+              <button @click="removeScriptLine(idx)" title="Remove line"
+                class="text-xs p-1 rounded-md border border-gray-200 dark:border-gray-600 text-gray-400 hover:text-red-500 dark:hover:text-red-400 hover:border-red-300 dark:hover:border-red-700 transition-colors shrink-0">
+                <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12"/></svg>
+              </button>
+            </div>
+          </div>
+
+          <!-- Hidden audio element for playback -->
+          <audio ref="scriptAudioPlayer" class="hidden"></audio>
+
+          <!-- Bottom controls -->
+          <div class="flex items-center gap-2 mt-3">
+            <button @click="addScriptLine"
+              class="text-sm px-3 py-1.5 rounded-lg border border-gray-300 dark:border-gray-600 hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors">
+              + Add Line
+            </button>
+            <div class="flex-1"></div>
+            <span v-if="scriptSyncStatus" class="text-xs text-gray-500 dark:text-gray-400">{{ scriptSyncStatus }}</span>
+            <button @click="closeScriptEditor"
+              class="text-sm px-3 py-1.5 rounded-lg border border-gray-300 dark:border-gray-600 hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors">
+              Cancel
+            </button>
+            <button @click="saveScript" :disabled="scriptSaving"
+              class="text-sm px-4 py-1.5 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 disabled:opacity-40 transition-colors font-medium flex items-center gap-2">
+              <svg v-if="scriptSaving" class="w-4 h-4 spinner" viewBox="0 0 24 24" fill="none">
+                <circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="3" class="opacity-25"/>
+                <path d="M12 2a10 10 0 019.95 9" stroke="currentColor" stroke-width="3" stroke-linecap="round"/>
+              </svg>
+              {{ scriptSaving ? 'Saving...' : 'Save Changes' }}
+            </button>
+          </div>
+        </div>
+
+        <!-- Timeline panel -->
+        <div v-if="showTimeline" class="mb-4 bg-white dark:bg-gray-800 rounded-xl border border-gray-200 dark:border-gray-700 p-4 shadow-sm sticky top-[57px] z-20">
+          <!-- Header row -->
+          <div class="flex items-center gap-3 mb-3">
+            <h3 class="text-sm font-semibold text-gray-700 dark:text-gray-300">Timeline</h3>
+            <span class="text-xs text-gray-400 dark:text-gray-500 tabular-nums">{{ fmtDuration(timelineTotalSeconds) }}</span>
+            <span v-if="playbackSpeed !== 1" class="text-xs text-indigo-500 dark:text-indigo-400 tabular-nums">{{ fmtDuration(timelineTotalSeconds / playbackSpeed) }} @ {{ playbackSpeed.toFixed(1) }}x</span>
+            <div class="flex-1"></div>
+            <button @click="toggleTimelinePlayPause" :disabled="!timelineHasDoneSegments"
+              class="text-xs px-2.5 py-1 rounded-md border border-indigo-200 dark:border-indigo-700 text-indigo-600 dark:text-indigo-400 hover:bg-indigo-50 dark:hover:bg-indigo-900/30 disabled:opacity-40 transition-colors font-medium flex items-center gap-1">
+              <svg v-if="!timelineIsPlaying" class="w-3.5 h-3.5" fill="currentColor" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
+              <svg v-else class="w-3.5 h-3.5" fill="currentColor" viewBox="0 0 24 24"><path d="M6 4h4v16H6V4zm8 0h4v16h-4V4z"/></svg>
+              {{ timelineIsPlaying ? 'Pause' : 'Play All' }}
+            </button>
+            <button v-if="timelinePlayingIdx >= 0" @click="stopTimelinePlayback"
+              class="text-xs px-2.5 py-1 rounded-md border border-gray-300 dark:border-gray-600 text-gray-600 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors font-medium">
+              Stop
+            </button>
+            <button @click="transcribeAll" :disabled="transcribeAllProgress !== null"
+              class="text-xs px-2.5 py-1 rounded-md border border-purple-200 dark:border-purple-700 text-purple-600 dark:text-purple-400 hover:bg-purple-50 dark:hover:bg-purple-900/20 disabled:opacity-40 transition-colors font-medium flex items-center gap-1">
+              <svg v-if="transcribeAllProgress !== null" class="w-3 h-3 spinner" viewBox="0 0 24 24" fill="none">
+                <circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="3" class="opacity-25"/>
+                <path d="M12 2a10 10 0 019.95 9" stroke="currentColor" stroke-width="3" stroke-linecap="round"/>
+              </svg>
+              {{ transcribeAllProgress !== null ? 'Transcribing...' : 'Transcribe All' }}
+            </button>
+          </div>
+
+          <!-- Position indicator -->
+          <div v-if="timelinePlayingIdx >= 0" class="text-xs text-gray-500 dark:text-gray-400 mb-2 tabular-nums flex items-center gap-3">
+            <span>{{ fmtDuration(timelineOffsets[timelinePlayingIdx] + timelineCurrentTime) }} / {{ fmtDuration(timelineTotalSeconds) }}</span>
+            <span v-if="playbackSpeed !== 1" class="text-indigo-500 dark:text-indigo-400">{{ fmtDuration((timelineOffsets[timelinePlayingIdx] + timelineCurrentTime) / playbackSpeed) }} / {{ fmtDuration(timelineTotalSeconds / playbackSpeed) }} @ {{ playbackSpeed.toFixed(1) }}x</span>
+            <span>&mdash; Segment {{ timelinePlayingIdx + 1 }} of {{ segments.length }}</span>
+          </div>
+
+          <!-- Word track: flowing text with karaoke highlighting -->
+          <div v-if="Object.keys(transcriptions).length" ref="wordTrackScrollEl"
+            class="rounded-t-lg overflow-x-auto overflow-y-hidden bg-gray-50 dark:bg-gray-900/30 border-b border-gray-200 dark:border-gray-700 timeline-scroll px-3 py-1.5 whitespace-nowrap"
+            style="height: auto; max-height: 32px;">
+            <template v-for="(seg, idx) in segments" :key="'wt-' + seg.id"><template v-if="transcriptions[seg.id]"><span v-for="(w, wi) in transcriptions[seg.id].words" :key="idx + '-' + wi"
+                  class="text-sm transition-colors duration-100 inline"
+                  :class="[
+                    timelinePlayingIdx === idx && timelineCurrentTime >= w.start && timelineCurrentTime <= w.end ? 'word-active text-indigo-600 dark:text-indigo-300 font-bold bg-indigo-100 dark:bg-indigo-900/40 rounded px-0.5' : timelinePlayingIdx === idx && timelineCurrentTime > w.end ? 'text-gray-400 dark:text-gray-500' : timelinePlayingIdx > idx ? 'text-gray-400 dark:text-gray-500' : 'text-gray-500 dark:text-gray-400'
+                  ]">{{ ' ' + w.word + ' ' }}</span></template><span v-else-if="seg.status === 'done'" class="text-xs text-gray-300 dark:text-gray-600 italic">... </span><span class="text-gray-300 dark:text-gray-600 mx-1.5 text-[10px]" v-if="idx < segments.length - 1">|</span>{{ ' ' }}</template>
+          </div>
+
+          <!-- Zoomed timeline bar -->
+          <div ref="timelineScrollEl" @scroll="onTimelineScroll"
+            class="relative overflow-x-auto overflow-y-hidden bg-gray-100 dark:bg-gray-900/50 timeline-scroll"
+            :class="Object.keys(transcriptions).length ? 'rounded-b-lg' : 'rounded-lg'"
+            style="height: 64px;">
+            <div class="flex h-full relative" :style="{ width: timelineInnerWidth + '%' }">
+              <div v-for="(seg, idx) in segments" :key="seg.id"
+                :style="{ width: timelineWidths[idx] + '%', minWidth: '4px' }"
+                class="relative h-full cursor-pointer border-r border-white/30 dark:border-gray-800/30 last:border-r-0 transition-shadow"
+                :class="[
+                  seg.status === 'done' ? 'bg-emerald-200/60 dark:bg-emerald-900/40' :
+                  seg.status === 'error' ? 'bg-red-200/60 dark:bg-red-900/40' :
+                  seg.status === 'generating' ? 'bg-amber-200/60 dark:bg-amber-900/40' :
+                  'bg-gray-200/60 dark:bg-gray-700/40',
+                  timelinePlayingIdx === idx ? 'ring-2 ring-indigo-500 ring-inset z-10' : '',
+                ]"
+                @click="timelineClickSegment(idx)">
+                <!-- Waveform canvas -->
+                <canvas :id="'waveform-' + seg.id" class="absolute inset-0 w-full h-full pointer-events-none"></canvas>
+                <!-- Position label -->
+                <span class="absolute bottom-0.5 left-1 text-[10px] font-bold text-gray-500/60 dark:text-gray-400/50 pointer-events-none">{{ seg.position }}</span>
+              </div>
+              <!-- Playback cursor -->
+              <div v-if="timelinePlayingIdx >= 0"
+                class="absolute top-0 bottom-0 pointer-events-none transition-[left] duration-75"
+                :style="{ left: timelineCursorPercent + '%' }">
+                <div class="w-0.5 h-full bg-indigo-500" style="margin-left: -1px;"></div>
+                <div class="absolute -top-1 left-1/2 -translate-x-1/2 w-2.5 h-2.5 rounded-full bg-indigo-500 border-2 border-white dark:border-gray-800"></div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Minimap -->
+          <div v-if="timelineZoom > 1" class="relative mt-1.5 rounded bg-gray-100 dark:bg-gray-900/50 cursor-pointer" style="height: 20px;"
+            @click="onMinimapClick">
+            <!-- Segment bars -->
+            <div class="flex h-full">
+              <div v-for="(seg, idx) in segments" :key="'mm-' + seg.id"
+                :style="{ width: timelineWidths[idx] + '%' }"
+                class="h-full border-r border-white/20 dark:border-gray-800/20 last:border-r-0"
+                :class="[
+                  seg.status === 'done' ? 'bg-emerald-300/50 dark:bg-emerald-900/30' :
+                  seg.status === 'error' ? 'bg-red-300/50 dark:bg-red-900/30' :
+                  'bg-gray-300/50 dark:bg-gray-700/30',
+                ]"></div>
+            </div>
+            <!-- Viewport indicator -->
+            <div class="absolute top-0 bottom-0 border-2 border-indigo-500/70 rounded-sm bg-indigo-500/10"
+              :style="{ left: (timelineViewportLeft * 100) + '%', width: (timelineViewportRatio * 100) + '%' }"></div>
+            <!-- Cursor on minimap -->
+            <div v-if="timelinePlayingIdx >= 0"
+              class="absolute top-0 bottom-0 pointer-events-none"
+              :style="{ left: timelineCursorPercent + '%' }">
+              <div class="w-0.5 h-full bg-indigo-500" style="margin-left: -1px;"></div>
+            </div>
+          </div>
+
+          <!-- Hidden audio player -->
+          <audio ref="timelineAudioPlayer" class="hidden"
+            @ended="onTimelineAudioEnded"
+            @timeupdate="onTimelineTimeUpdate"></audio>
+        </div>
+
+        <!-- Add segment inline -->
+        <div v-if="showAddSegment" class="mb-4 flex gap-2">
+          <input v-model="addText" placeholder="Enter segment text..."
+            class="flex-1 text-sm border border-gray-300 dark:border-gray-600 rounded-lg px-3 py-2 bg-white dark:bg-gray-800 dark:text-gray-100 focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none"
+            @keyup.enter="addSegment">
+          <button @click="addSegment" :disabled="!addText.trim()"
+            class="text-sm px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 disabled:opacity-40 transition-colors font-medium">
+            Add
+          </button>
+        </div>
+
+        <!-- Segments list -->
+        <div v-if="segments.length" class="bg-white dark:bg-gray-800 rounded-xl border border-gray-200 dark:border-gray-700 shadow-sm overflow-hidden">
+          <div v-for="(seg, idx) in segments" :key="seg.id">
+            <!-- Insert zone above this segment -->
+            <div class="relative group/insert" v-if="insertAtPosition !== seg.position">
+              <div class="flex items-center justify-center h-0 group-hover/insert:h-8 transition-all duration-150 overflow-hidden cursor-pointer border-b border-transparent group-hover/insert:border-dashed group-hover/insert:border-indigo-300 dark:group-hover/insert:border-indigo-700 group-hover/insert:bg-indigo-50/50 dark:group-hover/insert:bg-indigo-900/10"
+                @click="insertAtPosition = seg.position; insertText = ''; $nextTick(() => $refs['insertInput-' + seg.position]?.focus())">
+                <span class="text-xs text-indigo-400 dark:text-indigo-500 font-medium opacity-0 group-hover/insert:opacity-100 transition-opacity flex items-center gap-1">
+                  <svg class="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M12 4v16m8-8H4"/></svg>
+                  Insert segment
+                </span>
+              </div>
+            </div>
+            <!-- Active insert form -->
+            <div v-if="insertAtPosition === seg.position" class="flex items-center gap-2 px-3 sm:px-4 py-2 bg-indigo-50 dark:bg-indigo-900/20 border-b border-indigo-200 dark:border-indigo-800">
+              <span class="text-xs text-indigo-400 dark:text-indigo-500 font-bold shrink-0">+</span>
+              <input :ref="'insertInput-' + seg.position" v-model="insertText" placeholder="New segment text..."
+                class="flex-1 text-sm border border-indigo-300 dark:border-indigo-700 rounded-lg px-2.5 py-1.5 bg-white dark:bg-gray-800 dark:text-gray-100 focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none"
+                @keyup.enter="insertSegment" @keyup.escape="cancelInsert">
+              <button @click="insertSegment" :disabled="!insertText.trim()"
+                class="text-xs px-3 py-1.5 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 disabled:opacity-40 transition-colors font-medium">Insert</button>
+              <button @click="cancelInsert"
+                class="text-xs px-2 py-1.5 border border-gray-300 dark:border-gray-600 rounded-lg hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors">Cancel</button>
+            </div>
+
+            <div
+              class="flex items-start gap-2 sm:gap-3 px-3 sm:px-4 py-3 transition-colors group"
+              :class="[
+                idx < segments.length - 1 ? 'border-b border-gray-100 dark:border-gray-700' : '',
+                dragOverId === seg.id ? 'drag-over' : '',
+                dragId === seg.id ? 'dragging' : '',
+                'hover:bg-gray-50/70 dark:hover:bg-gray-700/50'
+              ]"
+              draggable="true"
+              @dragstart="onDragStart($event, seg)"
+              @dragover.prevent="onDragOver(seg)"
+              @dragleave="dragOverId = null"
+              @drop.prevent="onDrop(seg)"
+              @dragend="onDragEnd"
+            >
+              <!-- Handle + number -->
+              <div class="flex items-center gap-1 pt-0.5 shrink-0">
+                <span class="cursor-grab active:cursor-grabbing text-gray-300 dark:text-gray-600 hover:text-gray-500 dark:hover:text-gray-400 transition-colors select-none text-sm" title="Drag to reorder">&#x2630;</span>
+                <span class="w-6 text-center text-xs font-bold text-gray-400 dark:text-gray-500">{{ seg.position }}</span>
+              </div>
+
+              <!-- Body -->
+              <div class="flex-1 min-w-0">
+                <template v-if="editing === seg.id">
+                  <div class="flex gap-2">
+                    <textarea v-model="editText" rows="3"
+                      class="flex-1 text-sm border border-gray-300 dark:border-gray-600 rounded-lg px-2.5 py-1.5 bg-white dark:bg-gray-700 dark:text-gray-100 focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none resize-y min-h-[2.5rem]"
+                      @keyup.escape="editing = null"></textarea>
+                    <div class="flex flex-col gap-1 shrink-0">
+                      <button @click="saveEdit(seg.id)" class="text-xs px-2.5 py-1.5 bg-indigo-600 text-white rounded-md hover:bg-indigo-700 transition-colors">Save</button>
+                      <button @click="editing = null" class="text-xs px-2.5 py-1.5 border border-gray-300 dark:border-gray-600 rounded-md hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors">Cancel</button>
+                    </div>
+                  </div>
+                </template>
+                <template v-else>
+                  <p class="text-sm leading-relaxed cursor-pointer hover:text-indigo-600 dark:hover:text-indigo-400 transition-colors" @click="startEdit(seg)">{{ seg.text }}</p>
+                  <div v-if="seg.original_text" class="mt-1">
+                    <button @click="expandedOriginal === seg.id ? (expandedOriginal = null) : (expandedOriginal = seg.id)"
+                      class="text-[11px] text-gray-400 dark:text-gray-500 hover:text-indigo-500 dark:hover:text-indigo-400 transition-colors">
+                      {{ expandedOriginal === seg.id ? 'hide original' : 'show original' }}
+                    </button>
+                    <div v-if="expandedOriginal === seg.id"
+                      class="mt-1 text-xs text-gray-400 dark:text-gray-500 italic bg-gray-50 dark:bg-gray-900/40 rounded px-2 py-1.5 leading-relaxed whitespace-pre-line border border-gray-100 dark:border-gray-700/50">{{ seg.original_text }}</div>
+                  </div>
+                </template>
+              </div>
+
+              <!-- Controls -->
+              <div class="flex items-center gap-1.5 shrink-0 flex-wrap justify-end">
+                <select v-model="seg.service" @change="updateService(seg)"
+                  class="text-xs border border-gray-200 dark:border-gray-600 rounded-md px-1.5 py-1 bg-white dark:bg-gray-700 dark:text-gray-200 focus:ring-1 focus:ring-indigo-500 outline-none">
+                  <option value="dia">dia</option>
+                  <option value="magpie">magpie</option>
+                </select>
+
+                <span class="w-2.5 h-2.5 rounded-full shrink-0"
+                  :class="{
+                    'bg-gray-300 dark:bg-gray-600': seg.status === 'pending',
+                    'bg-amber-400 animate-pulse': seg.status === 'generating',
+                    'bg-emerald-400': seg.status === 'done',
+                    'bg-red-400': seg.status === 'error',
+                  }"
+                  :title="seg.status + (seg.error_message ? ': ' + seg.error_message : '')"></span>
+
+                <span class="text-xs text-gray-400 dark:text-gray-500 w-8 text-right tabular-nums">{{ seg.duration_seconds ? fmtDuration(seg.duration_seconds) : '\u2014' }}</span>
+
+                <button v-if="seg.status === 'done'" @click="toggleSegmentPlay(seg.id)"
+                  class="text-xs p-1.5 rounded-md border transition-colors"
+                  :class="segmentPlayingId === seg.id ? 'border-indigo-400 dark:border-indigo-500 text-indigo-600 dark:text-indigo-400 bg-indigo-50 dark:bg-indigo-900/30' : 'border-gray-200 dark:border-gray-600 text-gray-500 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-700'"
+                  :title="segmentPlayingId === seg.id ? 'Stop' : 'Play'">
+                  <svg v-if="segmentPlayingId !== seg.id" class="w-3.5 h-3.5" fill="currentColor" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
+                  <svg v-else class="w-3.5 h-3.5" fill="currentColor" viewBox="0 0 24 24"><path d="M6 4h4v16H6V4zm8 0h4v16h-4V4z"/></svg>
+                </button>
+
+                <!-- Trim needed indicator -->
+                <button v-if="seg.status === 'done' && segmentNeedsTrim(seg)" @click="toggleTrim(seg.id)"
+                  class="text-xs p-1 rounded-md border border-amber-200 dark:border-amber-700 text-amber-500 dark:text-amber-400 hover:bg-amber-50 dark:hover:bg-amber-900/20 transition-colors"
+                  title="Audio has excess silence — click to trim">
+                  <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M14.121 14.121L19 19m-7-7l7-7m-7 7l-7 7m7-7l-7-7"/></svg>
+                </button>
+
+                <button v-if="seg.status === 'error'" @click="generateOne(seg.id)" title="Retry"
+                  class="text-xs px-2 py-1 rounded-md border border-red-200 dark:border-red-700 text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-900/30 transition-colors">Retry</button>
+                <button v-else @click="generateOne(seg.id)" title="Generate"
+                  class="text-xs px-2 py-1 rounded-md border border-indigo-200 dark:border-indigo-700 text-indigo-600 dark:text-indigo-400 hover:bg-indigo-50 dark:hover:bg-indigo-900/30 transition-colors">Gen</button>
+
+                <button v-if="seg.status === 'done' && !generating" @click="toggleVariants(seg.id)"
+                  class="text-xs px-2 py-1 rounded-md border border-gray-200 dark:border-gray-600 text-gray-600 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors">
+                  {{ expandedVariants === seg.id ? 'Hide' : 'Variants' }}
+                </button>
+
+                <button v-if="seg.status === 'done'" @click="toggleTrim(seg.id)"
+                  class="text-xs px-2 py-1 rounded-md border transition-colors"
+                  :class="expandedTrim === seg.id ? 'border-cyan-400 dark:border-cyan-600 text-cyan-600 dark:text-cyan-400 bg-cyan-50 dark:bg-cyan-900/20' : 'border-gray-200 dark:border-gray-600 text-gray-600 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-700'">
+                  {{ expandedTrim === seg.id ? 'Hide' : 'Trim' }}
+                </button>
+
+                <button v-if="seg.status === 'done'" @click="transcriptions[seg.id] ? toggleTranscript(seg.id) : transcribeSegment(seg.id)" :disabled="transcribing[seg.id]"
+                  class="text-xs px-2 py-1 rounded-md border transition-colors flex items-center gap-1"
+                  :class="transcriptions[seg.id] ? (expandedTranscript === seg.id ? 'border-purple-400 dark:border-purple-600 text-purple-600 dark:text-purple-400 bg-purple-50 dark:bg-purple-900/20' : 'border-purple-200 dark:border-purple-700 text-purple-600 dark:text-purple-400 hover:bg-purple-50 dark:hover:bg-purple-900/20') : 'border-gray-200 dark:border-gray-600 text-gray-500 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-700'">
+                  <svg v-if="transcribing[seg.id]" class="w-3 h-3 spinner" viewBox="0 0 24 24" fill="none">
+                    <circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="3" class="opacity-25"/>
+                    <path d="M12 2a10 10 0 019.95 9" stroke="currentColor" stroke-width="3" stroke-linecap="round"/>
+                  </svg>
+                  {{ transcribing[seg.id] ? '' : transcriptions[seg.id] ? (expandedTranscript === seg.id ? 'Hide' : 'STT') : 'STT' }}
+                </button>
+
+                <button @click="deleteSegment(seg.id)"
+                  class="text-xs px-2 py-1 rounded-md transition-colors"
+                  :class="confirmDeleteSeg === seg.id ? 'bg-red-500 text-white' : 'border border-gray-200 dark:border-gray-600 text-gray-400 hover:text-red-500 dark:hover:text-red-400 hover:border-red-300 dark:hover:border-red-700 hover:bg-red-50 dark:hover:bg-red-900/30'">
+                  {{ confirmDeleteSeg === seg.id ? 'Sure?' : '\u00d7' }}
+                </button>
+              </div>
+            </div>
+
+            <!-- Variants panel -->
+            <div v-if="expandedVariants === seg.id" class="px-4 py-3 bg-gray-50 dark:bg-gray-900/50 border-b border-gray-100 dark:border-gray-700">
+              <div class="flex items-center gap-2 mb-2">
+                <h4 class="text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wider">Variants</h4>
+                <span class="text-xs text-gray-400 dark:text-gray-500">({{ (variantsMap[seg.id] || []).length }})</span>
+              </div>
+
+              <div v-if="!(variantsMap[seg.id] || []).length" class="text-xs text-gray-400 dark:text-gray-500 py-1">
+                No variants yet. Generate or regenerate to create variants.
+              </div>
+
+              <div v-for="v in (variantsMap[seg.id] || [])" :key="v.id"
+                class="flex items-center gap-2 py-1.5 border-b border-gray-200 dark:border-gray-700 last:border-0"
+                :class="seg.selected_variant_id === v.id ? 'font-medium' : ''">
+                <span v-if="seg.selected_variant_id === v.id"
+                  class="text-[10px] px-1.5 py-0.5 bg-indigo-500 text-white rounded font-medium uppercase">active</span>
+                <span class="flex-1 text-xs text-gray-500 dark:text-gray-400 truncate" :title="v.text">{{ v.service }} &middot; {{ fmtDuration(v.duration_seconds) }} &middot; {{ v.text }}</span>
+                <audio :src="'/api/variants/' + v.id + '/audio'" controls preload="none" class="max-w-[150px]" style="height:28px;"></audio>
+                <button v-if="seg.selected_variant_id !== v.id" @click="selectVariant(seg.id, v.id)"
+                  class="text-[11px] px-2 py-0.5 rounded border border-indigo-200 dark:border-indigo-700 text-indigo-600 dark:text-indigo-400 hover:bg-indigo-50 dark:hover:bg-indigo-900/30 transition-colors">Use</button>
+                <button @click="deleteVariantBtn(seg.id, v.id)"
+                  class="text-[11px] px-1.5 py-0.5 rounded transition-colors"
+                  :class="confirmDeleteVar === v.id ? 'bg-red-500 text-white' : 'border border-gray-200 dark:border-gray-600 text-gray-400 hover:text-red-500 dark:hover:text-red-400 hover:border-red-300 dark:hover:border-red-700'">
+                  {{ confirmDeleteVar === v.id ? 'Sure?' : '\u00d7' }}
+                </button>
+              </div>
+
+              <!-- Regenerate -->
+              <div class="flex gap-2 mt-2">
+                <input v-model="regenText[seg.id]" :placeholder="seg.text"
+                  class="flex-1 text-xs border border-gray-300 dark:border-gray-600 rounded-lg px-2.5 py-1.5 bg-white dark:bg-gray-700 dark:text-gray-100 focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none"
+                  @keyup.enter="regenerate(seg.id)">
+                <button @click="regenerate(seg.id)" :disabled="generating"
+                  class="text-xs px-3 py-1.5 rounded-lg border border-indigo-200 dark:border-indigo-700 text-indigo-600 dark:text-indigo-400 hover:bg-indigo-50 dark:hover:bg-indigo-900/30 disabled:opacity-40 transition-colors font-medium">
+                  Regenerate
+                </button>
+              </div>
+            </div>
+
+            <!-- Transcription panel -->
+            <div v-if="expandedTranscript === seg.id && transcriptions[seg.id]" class="px-4 py-3 bg-purple-50/50 dark:bg-purple-900/10 border-b border-gray-100 dark:border-gray-700">
+              <div class="flex items-center gap-2 mb-2">
+                <h4 class="text-xs font-semibold text-purple-600 dark:text-purple-400 uppercase tracking-wider">Transcription</h4>
+                <span class="text-xs text-gray-400 dark:text-gray-500">({{ transcriptions[seg.id].words.length }} words)</span>
+                <div class="flex-1"></div>
+                <button @click="transcribeSegment(seg.id)" :disabled="transcribing[seg.id]"
+                  class="text-[11px] px-2 py-0.5 rounded border border-purple-200 dark:border-purple-700 text-purple-600 dark:text-purple-400 hover:bg-purple-50 dark:hover:bg-purple-900/20 disabled:opacity-40 transition-colors flex items-center gap-1">
+                  <svg v-if="transcribing[seg.id]" class="w-3 h-3 spinner" viewBox="0 0 24 24" fill="none">
+                    <circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="3" class="opacity-25"/>
+                    <path d="M12 2a10 10 0 019.95 9" stroke="currentColor" stroke-width="3" stroke-linecap="round"/>
+                  </svg>
+                  Re-transcribe
+                </button>
+                <button @click="deleteTranscription(seg.id)"
+                  class="text-[11px] px-2 py-0.5 rounded border border-gray-200 dark:border-gray-600 text-gray-400 hover:text-red-500 dark:hover:text-red-400 hover:border-red-300 dark:hover:border-red-700 transition-colors">Delete</button>
+              </div>
+
+              <!-- Full text -->
+              <p class="text-sm text-gray-700 dark:text-gray-300 mb-3 leading-relaxed">{{ transcriptions[seg.id].text }}</p>
+
+              <!-- Word pills -->
+              <div class="flex flex-wrap gap-1">
+                <button v-for="(w, wi) in transcriptions[seg.id].words" :key="wi"
+                  @click="seekToWord(seg.id, w.start)"
+                  class="text-[11px] px-1.5 py-0.5 rounded-md border transition-colors cursor-pointer hover:bg-purple-100 dark:hover:bg-purple-900/30"
+                  :class="getActiveWordIdx(seg.id) === wi ? 'bg-purple-500 text-white border-purple-500' : 'bg-white dark:bg-gray-800 text-gray-600 dark:text-gray-400 border-gray-200 dark:border-gray-700'"
+                  :title="w.start.toFixed(2) + 's - ' + w.end.toFixed(2) + 's'">
+                  {{ w.word }}
+                </button>
+              </div>
+            </div>
+
+            <!-- Trim panel -->
+            <div v-if="expandedTrim === seg.id" class="px-4 py-3 bg-cyan-50/50 dark:bg-cyan-900/10 border-b border-gray-100 dark:border-gray-700">
+              <div class="flex items-center gap-2 mb-3">
+                <h4 class="text-xs font-semibold text-cyan-600 dark:text-cyan-400 uppercase tracking-wider">Audio Trim</h4>
+                <span class="text-xs text-gray-400 dark:text-gray-500 tabular-nums">{{ (trimStart / 1000).toFixed(2) }}s — {{ (trimEnd / 1000).toFixed(2) }}s ({{ ((trimEnd - trimStart) / 1000).toFixed(2) }}s)</span>
+                <div class="flex-1"></div>
+                <button @click="autoSuggestTrim"
+                  class="text-[11px] px-2 py-0.5 rounded border border-cyan-200 dark:border-cyan-700 text-cyan-600 dark:text-cyan-400 hover:bg-cyan-50 dark:hover:bg-cyan-900/20 transition-colors font-medium">Auto</button>
+                <button @click="previewTrim"
+                  class="text-[11px] px-2 py-0.5 rounded border border-indigo-200 dark:border-indigo-700 text-indigo-600 dark:text-indigo-400 hover:bg-indigo-50 dark:hover:bg-indigo-900/20 transition-colors font-medium">Preview</button>
+                <button @click="applyTrim" :disabled="trimApplying"
+                  class="text-[11px] px-2 py-0.5 rounded border border-emerald-200 dark:border-emerald-700 text-emerald-600 dark:text-emerald-400 hover:bg-emerald-50 dark:hover:bg-emerald-900/20 disabled:opacity-40 transition-colors font-medium flex items-center gap-1">
+                  <svg v-if="trimApplying" class="w-3 h-3 spinner" viewBox="0 0 24 24" fill="none">
+                    <circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="3" class="opacity-25"/>
+                    <path d="M12 2a10 10 0 019.95 9" stroke="currentColor" stroke-width="3" stroke-linecap="round"/>
+                  </svg>
+                  {{ trimApplying ? 'Trimming...' : 'Apply Trim' }}
+                </button>
+              </div>
+
+              <!-- Waveform canvas with trim handles -->
+              <div class="relative select-none" style="height: 120px;">
+                <canvas :id="'trim-waveform-' + seg.id" class="w-full h-full rounded-lg bg-gray-100 dark:bg-gray-900/50"></canvas>
+                <!-- Start handle -->
+                <div class="absolute top-0 bottom-0 trim-handle" :style="{ left: (trimStart / trimAudioDuration * 100) + '%' }"
+                  @mousedown="onTrimMouseDown($event, 'start')">
+                  <div class="w-1 h-full bg-indigo-500 rounded-full"></div>
+                  <div class="absolute -top-1 left-1/2 -translate-x-1/2 w-3 h-3 rounded-full bg-indigo-500 border-2 border-white dark:border-gray-800"></div>
+                  <div class="absolute -bottom-1 left-1/2 -translate-x-1/2 w-3 h-3 rounded-full bg-indigo-500 border-2 border-white dark:border-gray-800"></div>
+                </div>
+                <!-- End handle -->
+                <div class="absolute top-0 bottom-0 trim-handle" :style="{ left: (trimEnd / trimAudioDuration * 100) + '%' }"
+                  @mousedown="onTrimMouseDown($event, 'end')">
+                  <div class="w-1 h-full bg-indigo-500 rounded-full"></div>
+                  <div class="absolute -top-1 left-1/2 -translate-x-1/2 w-3 h-3 rounded-full bg-indigo-500 border-2 border-white dark:border-gray-800"></div>
+                  <div class="absolute -bottom-1 left-1/2 -translate-x-1/2 w-3 h-3 rounded-full bg-indigo-500 border-2 border-white dark:border-gray-800"></div>
+                </div>
+                <!-- Grey overlay for excluded regions -->
+                <div class="absolute top-0 bottom-0 left-0 bg-gray-400/20 dark:bg-gray-600/20 rounded-l-lg pointer-events-none" :style="{ width: (trimStart / trimAudioDuration * 100) + '%' }"></div>
+                <div class="absolute top-0 bottom-0 right-0 bg-gray-400/20 dark:bg-gray-600/20 rounded-r-lg pointer-events-none" :style="{ width: (100 - trimEnd / trimAudioDuration * 100) + '%' }"></div>
+              </div>
+
+              <!-- Word markers legend -->
+              <div v-if="transcriptions[seg.id]" class="mt-1 flex flex-wrap gap-1">
+                <span v-for="(w, wi) in transcriptions[seg.id].words" :key="'tw-' + wi"
+                  class="text-[10px] px-1 py-0.5 rounded transition-colors"
+                  :class="w.start * 1000 >= trimStart && w.end * 1000 <= trimEnd ? 'text-cyan-600 dark:text-cyan-400' : 'text-gray-300 dark:text-gray-600 line-through'"
+                  :title="w.start.toFixed(2) + 's - ' + w.end.toFixed(2) + 's'">{{ w.word }}</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- Insert zone after last segment -->
+          <div class="relative group/insert" v-if="insertAtPosition !== segments.length + 1">
+            <div class="flex items-center justify-center h-0 group-hover/insert:h-8 transition-all duration-150 overflow-hidden cursor-pointer border-t border-transparent group-hover/insert:border-dashed group-hover/insert:border-indigo-300 dark:group-hover/insert:border-indigo-700 group-hover/insert:bg-indigo-50/50 dark:group-hover/insert:bg-indigo-900/10"
+              @click="insertAtPosition = segments.length + 1; insertText = ''; $nextTick(() => $refs['insertInput-' + (segments.length + 1)]?.focus())">
+              <span class="text-xs text-indigo-400 dark:text-indigo-500 font-medium opacity-0 group-hover/insert:opacity-100 transition-opacity flex items-center gap-1">
+                <svg class="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M12 4v16m8-8H4"/></svg>
+                Insert segment
+              </span>
+            </div>
+          </div>
+          <div v-if="insertAtPosition === segments.length + 1" class="flex items-center gap-2 px-3 sm:px-4 py-2 bg-indigo-50 dark:bg-indigo-900/20 border-t border-indigo-200 dark:border-indigo-800">
+            <span class="text-xs text-indigo-400 dark:text-indigo-500 font-bold shrink-0">+</span>
+            <input :ref="'insertInput-' + (segments.length + 1)" v-model="insertText" placeholder="New segment text..."
+              class="flex-1 text-sm border border-indigo-300 dark:border-indigo-700 rounded-lg px-2.5 py-1.5 bg-white dark:bg-gray-800 dark:text-gray-100 focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none"
+              @keyup.enter="insertSegment" @keyup.escape="cancelInsert">
+            <button @click="insertSegment" :disabled="!insertText.trim()"
+              class="text-xs px-3 py-1.5 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 disabled:opacity-40 transition-colors font-medium">Insert</button>
+            <button @click="cancelInsert"
+              class="text-xs px-2 py-1.5 border border-gray-300 dark:border-gray-600 rounded-lg hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors">Cancel</button>
+          </div>
+        </div>
+
+        <!-- Empty state -->
+        <div v-else class="text-center py-16">
+          <div class="inline-flex items-center justify-center w-16 h-16 rounded-full bg-gray-100 dark:bg-gray-800 mb-4">
+            <svg class="w-8 h-8 text-gray-400 dark:text-gray-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M19.114 5.636a9 9 0 010 12.728M16.463 8.288a5.25 5.25 0 010 7.424M6.75 8.25l4.72-4.72a.75.75 0 011.28.53v15.88a.75.75 0 01-1.28.53l-4.72-4.72H4.51c-.88 0-1.704-.507-1.938-1.354A9.01 9.01 0 012.25 12c0-.83.112-1.633.322-2.396C2.806 8.756 3.63 8.25 4.51 8.25H6.75z"/>
+            </svg>
+          </div>
+          <p class="text-gray-500 dark:text-gray-400 text-sm mb-1">No segments yet</p>
+          <p class="text-gray-400 dark:text-gray-500 text-xs">Import a script or add segments manually to get started.</p>
+        </div>
+
+        <!-- Shared segment audio player -->
+        <audio ref="segmentAudioPlayer" class="hidden" @ended="onSegmentAudioEnded"></audio>
+
+      </template>
+
+      <!-- No project state -->
+      <div v-else class="text-center py-20">
+        <div class="inline-flex items-center justify-center w-20 h-20 rounded-full bg-indigo-50 dark:bg-indigo-900/30 mb-5">
+          <svg class="w-10 h-10 text-indigo-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M12 10.5v6m3-3H9m4.06-7.19l-2.12-2.12a1.5 1.5 0 00-1.061-.44H4.5A2.25 2.25 0 002.25 6v12a2.25 2.25 0 002.25 2.25h15A2.25 2.25 0 0021.75 18V9a2.25 2.25 0 00-2.25-2.25h-5.379a1.5 1.5 0 01-1.06-.44z"/>
+          </svg>
+        </div>
+        <p class="text-gray-600 dark:text-gray-300 font-medium mb-1">Create a project to get started</p>
+        <p class="text-gray-400 dark:text-gray-500 text-sm">Each project holds its own script, segments, and generated audio.</p>
+      </div>
+
+    </main>
+  </div>
+
+  <script>
+    const { createApp, ref, reactive, computed, onMounted, onUnmounted, watch, nextTick } = Vue;
+
+    createApp({
+      setup() {
+        const darkMode = ref(document.documentElement.classList.contains('dark'));
+        const playbackSpeed = ref(parseFloat(localStorage.getItem('playbackSpeed') || '1'));
+
+        function toggleDark() {
+          darkMode.value = !darkMode.value;
+          document.documentElement.classList.toggle('dark', darkMode.value);
+          localStorage.setItem('theme', darkMode.value ? 'dark' : 'light');
+        }
+
+        const projects = ref([]);
+        const currentProjectId = ref(null);
+        const showNewProject = ref(false);
+        const newProjectName = ref('');
+        const confirmDeleteProject = ref(false);
+
+        const segments = ref([]);
+        const showImport = ref(false);
+        const importText = ref('');
+        const importService = ref('dia');
+        const importMode = ref('script');
+        const articleText = ref('');
+        const articleSegments = ref([]);
+        const articleChunks = ref([]); // [{raw, segments, processed, error}]
+        const articleSegmentsFlat = computed(() => {
+          const flat = [];
+          let idx = 0;
+          for (const chunk of articleChunks.value) {
+            for (const seg of chunk.segments) {
+              flat.push({ index: idx++, text: seg, processed: chunk.processed, error: chunk.error });
+            }
+          }
+          return flat;
+        });
+        const articleChunksProcessed = computed(() => articleChunks.value.filter(c => c.processed).length);
+        const articleChunksErrorCount = computed(() => articleChunks.value.filter(c => c.error).length);
+        const articleProcessing = ref(false);
+        const articleStatus = ref('');
+        const editing = ref(null);
+        const editText = ref('');
+        const generating = ref(false);
+        const status = ref('');
+        const expandedVariants = ref(null);
+        const expandedOriginal = ref(null);
+        const variantsMap = reactive({});
+        const regenText = reactive({});
+        const showAddSegment = ref(false);
+        const addText = ref('');
+        const confirmDeleteSeg = ref(null);
+        const confirmDeleteVar = ref(null);
+        const confirmClear = ref(false);
+        const dragId = ref(null);
+        const dragOverId = ref(null);
+        const insertAtPosition = ref(null); // position to insert before (1-based)
+        const insertText = ref('');
+
+        // Segment playback
+        const segmentPlayingId = ref(null);
+        const segmentAudioPlayer = ref(null);
+
+        // Global voice
+        const globalVoiceSampleId = ref(null);
+        const globalMagpieVoice = ref('');
+
+        // Trim state
+        const expandedTrim = ref(null);
+        const trimStart = ref(0);
+        const trimEnd = ref(0);
+        const trimWaveformData = ref(null);
+        const trimAudioDuration = ref(1); // avoid divide-by-zero
+        const trimApplying = ref(false);
+        const trimDragging = ref(null);
+
+        // Export options
+        const showExport = ref(false);
+        const exportFormat = ref('wav');
+        const exportGapMs = ref('750');
+        const exportFadeMs = ref('50');
+        const exportNormalize = ref(true);
+
+        // Voice samples
+        const showVoices = ref(false);
+        const voiceSamples = ref([]);
+        const magpieVoices = ref([]);
+        const vsName = ref('');
+        const vsTranscript = ref('');
+        const vsFileInput = ref(null);
+        const confirmDeleteVs = ref(null);
+
+        // Script editor state
+        const showScriptEditor = ref(false);
+        const scriptLines = ref([]);
+        const scriptSaving = ref(false);
+        const scriptSyncStatus = ref('');
+        const scriptAudioPlayer = ref(null);
+
+        // Timeline state
+        const showTimeline = ref(false);
+        const timelineAudioPlayer = ref(null);
+        const timelinePlayingIdx = ref(-1);
+        const timelineCurrentTime = ref(0);
+        const timelineIsPlaying = ref(false);
+        const timelineScrollEl = ref(null);
+        const timelineScrollLeft = ref(0);
+        const timelineContainerWidth = ref(0);
+        const waveformData = reactive({});
+        const waveformLoading = reactive({});
+
+        // Transcription state
+        const transcriptions = reactive({}); // {segmentId: {text, words: [{word, start, end}]}}
+        const transcribing = reactive({}); // {segmentId: true} while in progress
+        const expandedTranscript = ref(null); // segment id with open transcript panel
+        const transcribeAllProgress = ref(null); // null or {done, total}
+        const wordTrackScrollEl = ref(null);
+        let timelineAnimFrame = null;
+        let audioContext = null;
+
+        const MIN_SEGMENT_PX = 50;
+
+        // Zoom factor: how wide the inner timeline should be relative to container
+        const timelineZoom = computed(() => {
+          const n = segments.value.length;
+          if (!n) return 1;
+          // Approximate container width (will be updated on mount/scroll)
+          const cw = timelineContainerWidth.value || 600;
+          const needed = n * MIN_SEGMENT_PX;
+          return Math.max(1, needed / cw);
+        });
+
+        // Inner timeline width as a percentage of the container
+        const timelineInnerWidth = computed(() => timelineZoom.value * 100);
+
+        // Viewport ratio for the minimap (what fraction of the full timeline is visible)
+        const timelineViewportRatio = computed(() => Math.min(1, 1 / timelineZoom.value));
+
+        // Viewport left position as a fraction (0-1) of the full timeline
+        const timelineViewportLeft = computed(() => {
+          const el = timelineScrollEl.value;
+          if (!el || !el.scrollWidth || el.scrollWidth <= el.clientWidth) return 0;
+          return timelineScrollLeft.value / el.scrollWidth;
+        });
+
+        function onTimelineScroll() {
+          const el = timelineScrollEl.value;
+          if (el) {
+            timelineScrollLeft.value = el.scrollLeft;
+          }
+        }
+
+        function syncWordTrackScroll() {
+          // Word track is independent flowing text, no sync needed
+        }
+
+        function onMinimapClick(e) {
+          const el = timelineScrollEl.value;
+          if (!el) return;
+          const rect = e.currentTarget.getBoundingClientRect();
+          const clickFrac = (e.clientX - rect.left) / rect.width;
+          // Center the viewport on the clicked position
+          const targetFrac = Math.max(0, clickFrac - timelineViewportRatio.value / 2);
+          el.scrollLeft = targetFrac * el.scrollWidth;
+        }
+
+        function scrollTimelineToCursor() {
+          const el = timelineScrollEl.value;
+          if (!el || timelinePlayingIdx.value < 0) return;
+          const cursorFrac = timelineCursorPercent.value / 100;
+          const cursorPx = cursorFrac * el.scrollWidth;
+          const viewLeft = el.scrollLeft;
+          const viewRight = el.scrollLeft + el.clientWidth;
+          const margin = el.clientWidth * 0.25;
+          if (cursorPx < viewLeft + margin) {
+            el.scrollLeft = cursorPx - margin;
+          } else if (cursorPx > viewRight - margin) {
+            el.scrollLeft = cursorPx - el.clientWidth + margin;
+          }
+          // Scroll word track to keep the active word visible
+          scrollWordTrackToActive();
+        }
+
+        let _wordTrackScrollTarget = 0;
+        let _wordTrackAnimating = false;
+
+        function scrollWordTrackToActive() {
+          const wt = wordTrackScrollEl.value;
+          if (!wt || timelinePlayingIdx.value < 0) return;
+          const activeEl = wt.querySelector('.word-active');
+          if (!activeEl) return;
+          const wtRect = wt.getBoundingClientRect();
+          const wordRect = activeEl.getBoundingClientRect();
+          const wordCenter = wordRect.left + wordRect.width / 2 - wtRect.left + wt.scrollLeft;
+          _wordTrackScrollTarget = Math.max(0, wordCenter - wt.clientWidth / 3);
+          if (!_wordTrackAnimating) animateWordTrackScroll();
+        }
+
+        function animateWordTrackScroll() {
+          const wt = wordTrackScrollEl.value;
+          if (!wt) { _wordTrackAnimating = false; return; }
+          const diff = _wordTrackScrollTarget - wt.scrollLeft;
+          if (Math.abs(diff) < 1) {
+            wt.scrollLeft = _wordTrackScrollTarget;
+            _wordTrackAnimating = false;
+            return;
+          }
+          // Ease toward target — smooth lerp
+          wt.scrollLeft += diff * 0.12;
+          _wordTrackAnimating = true;
+          requestAnimationFrame(animateWordTrackScroll);
+        }
+
+        // Generation queue state
+        const cancelling = ref(false);
+        const genIndex = ref(0);
+        const genTotal = ref(0);
+        const genEstimate = ref(null);
+        const audioVersion = reactive({});
+        let ws = null;
+        let wsReconnectTimer = null;
+
+        const hasAudio = computed(() => segments.value.some(s => s.status === 'done'));
+        const doneCount = computed(() => segments.value.filter(s => s.status === 'done').length);
+        const errorCount = computed(() => segments.value.filter(s => s.status === 'error').length);
+        const pendingCount = computed(() => segments.value.filter(s => s.status !== 'done').length);
+        const genProgress = computed(() => genTotal.value > 0 ? Math.round((genIndex.value / genTotal.value) * 100) : 0);
+        const totalDuration = computed(() => {
+          const total = segments.value.reduce((sum, s) => sum + (s.duration_seconds || 0), 0);
+          return fmtDuration(total);
+        });
+
+        const timelineTotalSeconds = computed(() => {
+          return segments.value.reduce((sum, s) => {
+            if (s.duration_seconds) return sum + s.duration_seconds;
+            // Estimate from word count for pending segments
+            const words = s.text.trim().split(/\s+/).length;
+            return sum + words / 2.5;
+          }, 0);
+        });
+
+        const timelineOffsets = computed(() => {
+          const offsets = [];
+          let acc = 0;
+          for (const s of segments.value) {
+            offsets.push(acc);
+            acc += s.duration_seconds || (s.text.trim().split(/\s+/).length / 2.5);
+          }
+          return offsets;
+        });
+
+        const timelineWidths = computed(() => {
+          const total = timelineTotalSeconds.value;
+          if (!total) return segments.value.map(() => 0);
+          return segments.value.map(s => {
+            const dur = s.duration_seconds || (s.text.trim().split(/\s+/).length / 2.5);
+            return (dur / total) * 100;
+          });
+        });
+
+        const timelineCursorPercent = computed(() => {
+          const total = timelineTotalSeconds.value;
+          if (!total || timelinePlayingIdx.value < 0) return 0;
+          const offset = timelineOffsets.value[timelinePlayingIdx.value] || 0;
+          return ((offset + timelineCurrentTime.value) / total) * 100;
+        });
+
+        const timelineHasDoneSegments = computed(() => segments.value.some(s => s.status === 'done'));
+
+        function fmtDuration(sec) {
+          if (!sec) return '0:00';
+          const m = Math.floor(sec / 60);
+          const s = Math.floor(sec % 60);
+          return `${m}:${s.toString().padStart(2, '0')}`;
+        }
+
+        async function fetchProjects() {
+          const res = await fetch('/api/projects');
+          projects.value = await res.json();
+        }
+
+        async function createProjectFn() {
+          if (!newProjectName.value.trim()) return;
+          const res = await fetch('/api/projects', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name: newProjectName.value.trim() }),
+          });
+          const proj = await res.json();
+          newProjectName.value = '';
+          showNewProject.value = false;
+          await fetchProjects();
+          currentProjectId.value = proj.id;
+          await fetchSegments();
+        }
+
+        async function switchProject() {
+          expandedVariants.value = null;
+          expandedTranscript.value = null;
+          stopTimelinePlayback();
+          // Clear waveform cache
+          for (const key of Object.keys(waveformData)) delete waveformData[key];
+          for (const key of Object.keys(waveformLoading)) delete waveformLoading[key];
+          // Clear transcription cache
+          for (const key of Object.keys(transcriptions)) delete transcriptions[key];
+          await fetchSegments();
+          await fetchProjectTranscriptions();
+        }
+
+        async function deleteProject() {
+          if (!confirmDeleteProject.value) {
+            confirmDeleteProject.value = true;
+            setTimeout(() => confirmDeleteProject.value = false, 3000);
+            return;
+          }
+          confirmDeleteProject.value = false;
+          await fetch(`/api/projects/${currentProjectId.value}`, { method: 'DELETE' });
+          await fetchProjects();
+          currentProjectId.value = projects.value.length ? projects.value[0].id : null;
+          if (currentProjectId.value) await fetchSegments();
+          else segments.value = [];
+        }
+
+        async function fetchSegments() {
+          if (!currentProjectId.value) { segments.value = []; return; }
+          const res = await fetch(`/api/projects/${currentProjectId.value}/segments`);
+          segments.value = await res.json();
+        }
+
+        async function fetchVariants(segId) {
+          const res = await fetch(`/api/segments/${segId}/variants`);
+          variantsMap[segId] = await res.json();
+        }
+
+        async function toggleVariants(segId) {
+          if (expandedVariants.value === segId) { expandedVariants.value = null; }
+          else { expandedVariants.value = segId; await fetchVariants(segId); }
+        }
+
+        async function doImport() {
+          if (!importText.value.trim()) return;
+          await fetch(`/api/projects/${currentProjectId.value}/segments/import`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ text: importText.value, service: importService.value, magpie_voice: importService.value === 'magpie' ? globalMagpieVoice.value || null : null }),
+          });
+          showImport.value = false;
+          importText.value = '';
+          expandedVariants.value = null;
+          await fetchSegments();
+        }
+
+        function toggleImport() {
+          showImport.value = !showImport.value;
+          if (!showImport.value) {
+            articleChunks.value = [];
+            articleSegments.value = [];
+            articleProcessing.value = false;
+          }
+        }
+
+        async function processArticle() {
+          if (!articleText.value.trim() || articleProcessing.value) return;
+          articleProcessing.value = true;
+          articleStatus.value = 'Splitting article...';
+          articleChunks.value = [];
+          try {
+            const res = await fetch(`/api/projects/${currentProjectId.value}/import-article`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ text: articleText.value, service: importService.value, magpie_voice: importService.value === 'magpie' ? globalMagpieVoice.value || null : null }),
+            });
+            if (!res.ok) {
+              try {
+                const err = await res.json();
+                articleStatus.value = '';
+                status.value = err.detail || `Article processing failed (HTTP ${res.status})`;
+              } catch {
+                articleStatus.value = '';
+                status.value = `Article processing failed (HTTP ${res.status})`;
+              }
+              return;
+            }
+            const reader = res.body.getReader();
+            const decoder = new TextDecoder();
+            let buffer = '';
+            while (true) {
+              const { done, value } = await reader.read();
+              if (done) break;
+              buffer += decoder.decode(value, { stream: true });
+              const parts = buffer.split('\n\n');
+              buffer = parts.pop() || '';
+              for (const part of parts) {
+                const line = part.trim();
+                if (!line.startsWith('data: ')) continue;
+                try {
+                  const event = JSON.parse(line.slice(6));
+                  if (event.phase === 'splitting') {
+                    // Show all chunks immediately as unprocessed
+                    articleChunks.value = event.chunks.map(raw => ({
+                      raw, segments: [raw], processed: false, error: false, retrying: false,
+                    }));
+                    articleStatus.value = `Processing ${event.chunks.length} chunks with LLM...`;
+                  } else if (event.phase === 'chunk_done') {
+                    // Replace raw chunk with processed segments
+                    const chunk = articleChunks.value[event.index];
+                    if (chunk) {
+                      chunk.segments = event.segments.length ? event.segments : [chunk.raw];
+                      chunk.processed = true;
+                    }
+                    articleStatus.value = `Processing chunks... (${event.completed}/${event.total} done)`;
+                  } else if (event.phase === 'chunk_error') {
+                    const chunk = articleChunks.value[event.index];
+                    if (chunk) { chunk.error = true; chunk.processed = true; }
+                    articleStatus.value = `Processing chunks... (${event.completed}/${event.total} done)`;
+                  } else if (event.phase === 'processing') {
+                    // Heartbeat
+                    articleStatus.value = event.detail;
+                  } else if (event.phase === 'done') {
+                    articleStatus.value = '';
+                    if (event.detail) status.value = event.detail;
+                  } else if (event.phase === 'error') {
+                    articleStatus.value = '';
+                    status.value = event.detail;
+                  }
+                } catch (e) {}
+              }
+            }
+          } catch (e) {
+            articleStatus.value = '';
+            status.value = 'Article processing request failed: ' + e.message;
+          } finally {
+            articleProcessing.value = false;
+            articleStatus.value = '';
+          }
+        }
+
+        async function acceptArticleSegments() {
+          const allSegs = [];
+          const originalTexts = [];
+          for (const chunk of articleChunks.value) {
+            for (const seg of chunk.segments) {
+              allSegs.push(seg);
+              originalTexts.push(chunk.raw);
+            }
+          }
+          const text = allSegs.join('\n');
+          await fetch(`/api/projects/${currentProjectId.value}/segments/import`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ text, service: importService.value, magpie_voice: importService.value === 'magpie' ? globalMagpieVoice.value || null : null, original_texts: originalTexts }),
+          });
+          showImport.value = false;
+          articleChunks.value = [];
+          articleSegments.value = [];
+          articleText.value = '';
+          expandedVariants.value = null;
+          await fetchSegments();
+        }
+
+        async function retryChunk(ci) {
+          const chunk = articleChunks.value[ci];
+          if (!chunk || chunk.retrying) return;
+          chunk.retrying = true;
+          chunk.error = false;
+          try {
+            const res = await fetch('/api/process-chunk', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ text: chunk.raw }),
+            });
+            if (!res.ok) {
+              const err = await res.json().catch(() => ({}));
+              throw new Error(err.detail || `HTTP ${res.status}`);
+            }
+            const data = await res.json();
+            chunk.segments = data.segments.length ? data.segments : [chunk.raw];
+            chunk.processed = true;
+          } catch (e) {
+            chunk.error = true;
+            chunk.processed = true;
+            status.value = `Chunk ${ci + 1} retry failed: ${e.message}`;
+          } finally {
+            chunk.retrying = false;
+          }
+        }
+
+        async function retryAllFailedChunks() {
+          const indices = articleChunks.value.map((c, i) => c.error ? i : -1).filter(i => i >= 0);
+          await Promise.all(indices.map(i => retryChunk(i)));
+        }
+
+        function removeArticleSegment(ci, si) {
+          const chunk = articleChunks.value[ci];
+          if (!chunk || chunk.segments.length <= 1) return;
+          chunk.segments.splice(si, 1);
+        }
+
+        function autoResizeTextarea(e) {
+          const el = e.target;
+          el.style.height = 'auto';
+          el.style.height = el.scrollHeight + 'px';
+        }
+
+        async function addSegment() {
+          if (!addText.value.trim()) return;
+          await fetch(`/api/projects/${currentProjectId.value}/segments`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ text: addText.value.trim() }),
+          });
+          addText.value = '';
+          showAddSegment.value = false;
+          await fetchSegments();
+        }
+
+        async function insertSegment() {
+          if (!insertText.value.trim() || insertAtPosition.value === null) return;
+          await fetch(`/api/projects/${currentProjectId.value}/segments`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ text: insertText.value.trim(), position: insertAtPosition.value }),
+          });
+          insertText.value = '';
+          insertAtPosition.value = null;
+          await fetchSegments();
+        }
+
+        function cancelInsert() {
+          insertAtPosition.value = null;
+          insertText.value = '';
+        }
+
+        function startEdit(seg) { editing.value = seg.id; editText.value = seg.text; }
+
+        async function saveEdit(id) {
+          if (!editText.value.trim()) return;
+          await fetch(`/api/segments/${id}`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ text: editText.value }),
+          });
+          editing.value = null;
+          await fetchSegments();
+        }
+
+        async function updateService(seg) {
+          await fetch(`/api/segments/${seg.id}`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ service: seg.service }),
+          });
+        }
+
+        async function deleteSegment(id) {
+          if (confirmDeleteSeg.value !== id) {
+            confirmDeleteSeg.value = id;
+            setTimeout(() => { if (confirmDeleteSeg.value === id) confirmDeleteSeg.value = null; }, 2000);
+            return;
+          }
+          confirmDeleteSeg.value = null;
+          await fetch(`/api/segments/${id}`, { method: 'DELETE' });
+          if (expandedVariants.value === id) expandedVariants.value = null;
+          await fetchSegments();
+        }
+
+        async function clearAllSegments() {
+          if (!confirmClear.value) {
+            confirmClear.value = true;
+            setTimeout(() => confirmClear.value = false, 3000);
+            return;
+          }
+          confirmClear.value = false;
+          await fetch(`/api/projects/${currentProjectId.value}/segments`, { method: 'DELETE' });
+          expandedVariants.value = null;
+          await fetchSegments();
+        }
+
+        async function generateOne(id) {
+          try {
+            await patchGlobalVoice([id]);
+            const res = await fetch(`/api/segments/${id}/generate`, { method: 'POST' });
+            if (!res.ok) { const err = await res.json(); status.value = err.detail || 'Generation failed'; }
+          } catch (e) { status.value = 'Request failed'; }
+        }
+
+        async function generateAll() {
+          try {
+            const pending = segments.value.filter(s => s.status !== 'done');
+            if (pending.length) await patchGlobalVoice(pending.map(s => s.id));
+            const res = await fetch(`/api/projects/${currentProjectId.value}/generate/all`, { method: 'POST' });
+            if (!res.ok) { const err = await res.json(); status.value = err.detail || 'Generation failed'; }
+          } catch (e) { status.value = 'Request failed'; }
+        }
+
+        async function regenerate(segId) {
+          const textOverride = regenText[segId]?.trim() || null;
+          const body = textOverride ? { text: textOverride } : {};
+          regenText[segId] = '';
+          try {
+            const res = await fetch(`/api/segments/${segId}/regenerate`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(body),
+            });
+            if (!res.ok) { const err = await res.json(); status.value = err.detail || 'Regeneration failed'; }
+          } catch (e) { status.value = 'Request failed'; }
+        }
+
+        async function cancelGeneration() {
+          cancelling.value = true;
+          if (ws && ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ type: 'cancel' }));
+          }
+        }
+
+        async function retryFailed() {
+          try {
+            const errorSegs = segments.value.filter(s => s.status === 'error');
+            if (errorSegs.length) await patchGlobalVoice(errorSegs.map(s => s.id));
+            const res = await fetch(`/api/projects/${currentProjectId.value}/generate/failed`, { method: 'POST' });
+            if (!res.ok) { const err = await res.json(); status.value = err.detail || 'Retry failed'; }
+          } catch (e) { status.value = 'Request failed'; }
+        }
+
+        function updateSegmentInPlace(segId, data) {
+          const idx = segments.value.findIndex(s => s.id === segId);
+          if (idx !== -1) {
+            segments.value[idx] = { ...segments.value[idx], ...data };
+          }
+        }
+
+        function connectWs() {
+          const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+          ws = new WebSocket(`${proto}//${location.host}/ws`);
+
+          ws.onmessage = (event) => {
+            let msg;
+            try { msg = JSON.parse(event.data); } catch { return; }
+            handleWsMessage(msg);
+          };
+
+          ws.onclose = () => {
+            ws = null;
+            wsReconnectTimer = setTimeout(connectWs, 2000);
+          };
+
+          ws.onerror = () => { ws?.close(); };
+        }
+
+        function handleWsMessage(msg) {
+          switch (msg.type) {
+            case 'queued':
+              generating.value = true;
+              genTotal.value = msg.segment_ids.length;
+              genIndex.value = 0;
+              status.value = `Queued ${msg.segment_ids.length} segment${msg.segment_ids.length > 1 ? 's' : ''}...`;
+              break;
+
+            case 'segment_start': {
+              genIndex.value = msg.index;
+              genTotal.value = msg.total;
+              genEstimate.value = msg.estimate_seconds;
+              const seg = segments.value.find(s => s.id === msg.segment_id);
+              const pos = seg ? seg.position : msg.segment_id;
+              status.value = `Generating segment ${pos} (${msg.index + 1}/${msg.total})...`;
+              updateSegmentInPlace(msg.segment_id, { status: 'generating' });
+              break;
+            }
+
+            case 'segment_done':
+              genIndex.value = msg.index + 1;
+              genEstimate.value = null;
+              updateSegmentInPlace(msg.segment_id, msg.segment);
+              audioVersion[msg.segment_id] = (audioVersion[msg.segment_id] || 0) + 1;
+              if (expandedVariants.value === msg.segment_id) fetchVariants(msg.segment_id);
+              if (showTimeline.value) loadWaveform(msg.segment_id);
+              // Auto-transcribe after generation
+              transcribeSegment(msg.segment_id);
+              break;
+
+            case 'segment_error':
+              genIndex.value = msg.index + 1;
+              genEstimate.value = null;
+              updateSegmentInPlace(msg.segment_id, { status: 'error', error_message: msg.error });
+              break;
+
+            case 'job_done':
+              generating.value = false;
+              cancelling.value = false;
+              genTotal.value = 0;
+              genIndex.value = 0;
+              genEstimate.value = null;
+              if (msg.failed > 0) {
+                status.value = `Done: ${msg.generated} generated, ${msg.failed} failed`;
+              } else if (msg.generated > 0) {
+                status.value = `Generated ${msg.generated} segment${msg.generated > 1 ? 's' : ''}`;
+                setTimeout(() => { if (!generating.value) status.value = ''; }, 3000);
+              } else {
+                status.value = '';
+              }
+              break;
+
+            case 'job_cancelled':
+              generating.value = false;
+              cancelling.value = false;
+              genTotal.value = 0;
+              genIndex.value = 0;
+              genEstimate.value = null;
+              status.value = `Cancelled (${msg.completed} completed, ${msg.remaining} skipped)`;
+              fetchSegments();
+              break;
+
+            case 'queue_status':
+              if (!msg.active_job_id) {
+                generating.value = false;
+                cancelling.value = false;
+              } else {
+                generating.value = true;
+              }
+              break;
+          }
+        }
+
+        async function selectVariant(segId, variantId) {
+          await fetch(`/api/segments/${segId}/variants/${variantId}/select`, { method: 'POST' });
+          await fetchSegments();
+          await fetchVariants(segId);
+        }
+
+        async function deleteVariantBtn(segId, variantId) {
+          if (confirmDeleteVar.value !== variantId) {
+            confirmDeleteVar.value = variantId;
+            setTimeout(() => { if (confirmDeleteVar.value === variantId) confirmDeleteVar.value = null; }, 2000);
+            return;
+          }
+          confirmDeleteVar.value = null;
+          await fetch(`/api/variants/${variantId}`, { method: 'DELETE' });
+          await fetchSegments();
+          await fetchVariants(segId);
+        }
+
+        async function exportAudio() {
+          const params = new URLSearchParams({
+            format: exportFormat.value,
+            gap_ms: exportGapMs.value,
+            fade_ms: exportFadeMs.value,
+            normalize: exportNormalize.value,
+          });
+          window.location.href = `/api/projects/${currentProjectId.value}/export?${params}`;
+        }
+
+        // Voice samples
+        async function fetchVoiceSamples() {
+          const res = await fetch('/api/voice-samples');
+          voiceSamples.value = await res.json();
+        }
+
+        async function fetchMagpieVoices() {
+          try {
+            const res = await fetch('/api/voices');
+            const data = await res.json();
+            magpieVoices.value = data.voices || [];
+          } catch (e) { console.error('Failed to fetch Magpie voices:', e); }
+        }
+
+        async function uploadVoiceSample() {
+          if (!vsName.value.trim()) return;
+          const fileEl = vsFileInput.value;
+          if (!fileEl || !fileEl.files || !fileEl.files[0]) { status.value = 'Please select a WAV file'; return; }
+          const formData = new FormData();
+          formData.append('name', vsName.value.trim());
+          formData.append('transcript', vsTranscript.value.trim());
+          formData.append('audio', fileEl.files[0]);
+          const res = await fetch('/api/voice-samples', { method: 'POST', body: formData });
+          if (!res.ok) { const err = await res.json(); status.value = err.detail || 'Upload failed'; return; }
+          vsName.value = '';
+          vsTranscript.value = '';
+          fileEl.value = '';
+          await fetchVoiceSamples();
+        }
+
+        async function deleteVoiceSample(id) {
+          if (confirmDeleteVs.value !== id) {
+            confirmDeleteVs.value = id;
+            setTimeout(() => { if (confirmDeleteVs.value === id) confirmDeleteVs.value = null; }, 2000);
+            return;
+          }
+          confirmDeleteVs.value = null;
+          await fetch(`/api/voice-samples/${id}`, { method: 'DELETE' });
+          await fetchVoiceSamples();
+        }
+
+        async function updateVoice(seg) {
+          const body = {};
+          if (seg.service === 'dia') body.voice_sample_id = seg.voice_sample_id || 0;
+          if (seg.service === 'magpie') body.magpie_voice = seg.magpie_voice || '';
+          await fetch(`/api/segments/${seg.id}`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+          });
+        }
+
+        // Script editor functions
+        function toggleScriptEditor() {
+          if (showScriptEditor.value) {
+            closeScriptEditor();
+          } else {
+            openScriptEditor();
+          }
+        }
+
+        function openScriptEditor() {
+          scriptLines.value = segments.value.map(seg => ({
+            text: seg.text,
+            originalText: seg.text,
+            segmentId: seg.id,
+            status: seg.status,
+            audioPath: seg.audio_path,
+          }));
+          scriptSyncStatus.value = '';
+          showScriptEditor.value = true;
+        }
+
+        function closeScriptEditor() {
+          showScriptEditor.value = false;
+          scriptLines.value = [];
+          scriptSyncStatus.value = '';
+        }
+
+        async function saveScript() {
+          const lines = scriptLines.value.map(l => l.text).filter(t => t.trim());
+          if (!lines.length) return;
+          scriptSaving.value = true;
+          scriptSyncStatus.value = '';
+          try {
+            const res = await fetch(`/api/projects/${currentProjectId.value}/segments/sync`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ lines }),
+            });
+            if (!res.ok) {
+              const err = await res.json();
+              scriptSyncStatus.value = err.detail || 'Sync failed';
+              return;
+            }
+            const data = await res.json();
+            const parts = [];
+            if (data.changed) parts.push(`${data.changed} changed`);
+            if (data.added) parts.push(`${data.added} added`);
+            if (data.removed) parts.push(`${data.removed} removed`);
+            scriptSyncStatus.value = parts.length ? parts.join(', ') : 'No changes';
+            status.value = parts.length ? `Script synced: ${parts.join(', ')}` : 'Script synced (no changes)';
+            if (parts.length) setTimeout(() => { if (!generating.value) status.value = ''; }, 4000);
+            await fetchSegments();
+            // Re-open with updated data
+            openScriptEditor();
+          } catch (e) {
+            scriptSyncStatus.value = 'Sync request failed';
+          } finally {
+            scriptSaving.value = false;
+          }
+        }
+
+        function addScriptLine() {
+          scriptLines.value.push({ text: '', originalText: '', segmentId: null, status: null, audioPath: null });
+        }
+
+        function removeScriptLine(idx) {
+          scriptLines.value.splice(idx, 1);
+        }
+
+        function splitScriptLine(idx) {
+          const text = scriptLines.value[idx].text;
+          // Find last ". " before 200 chars, or fall back to any ". "
+          let splitPos = -1;
+          const limit = Math.min(text.length, 200);
+          for (let i = limit - 1; i >= 0; i--) {
+            if (text[i] === '.' && i + 1 < text.length && text[i + 1] === ' ') {
+              splitPos = i + 1;
+              break;
+            }
+          }
+          if (splitPos <= 0) {
+            // Try any ". " in the string
+            const dotPos = text.indexOf('. ');
+            if (dotPos > 0) splitPos = dotPos + 1;
+          }
+          if (splitPos <= 0) return; // No split point found
+
+          const first = text.slice(0, splitPos).trim();
+          const second = text.slice(splitPos).trim();
+          scriptLines.value[idx].text = first;
+          scriptLines.value.splice(idx + 1, 0, {
+            text: second, originalText: '', segmentId: null, status: null, audioPath: null,
+          });
+        }
+
+        function playScriptLine(idx) {
+          const line = scriptLines.value[idx];
+          if (!line.segmentId || !line.audioPath) return;
+          const player = scriptAudioPlayer.value;
+          if (player) {
+            player.src = `/api/segments/${line.segmentId}/audio?v=${audioVersion[line.segmentId] || 0}`;
+            player.play();
+          }
+        }
+
+        function scriptLineWords(text) {
+          return text.trim() ? text.trim().split(/\s+/).length : 0;
+        }
+
+        function scriptLineEstDuration(text) {
+          const words = scriptLineWords(text);
+          return (words / 2.5).toFixed(1);
+        }
+
+        function onDragStart(e, seg) { dragId.value = seg.id; e.dataTransfer.effectAllowed = 'move'; }
+        function onDragOver(seg) { if (dragId.value !== seg.id) dragOverId.value = seg.id; }
+        function onDragEnd() { dragId.value = null; dragOverId.value = null; }
+        async function onDrop(targetSeg) {
+          dragOverId.value = null;
+          if (!dragId.value || dragId.value === targetSeg.id) return;
+          const ordered = [...segments.value].sort((a, b) => a.position - b.position);
+          const srcIdx = ordered.findIndex(s => s.id === dragId.value);
+          const dstIdx = ordered.findIndex(s => s.id === targetSeg.id);
+          const [moved] = ordered.splice(srcIdx, 1);
+          ordered.splice(dstIdx, 0, moved);
+          const ordering = ordered.map((s, i) => ({ id: s.id, position: i + 1 }));
+          await fetch('/api/segments/reorder', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ ordering }),
+          });
+          dragId.value = null;
+          await fetchSegments();
+        }
+
+        // Timeline functions
+        function getAudioContext() {
+          if (!audioContext) audioContext = new (window.AudioContext || window.webkitAudioContext)();
+          return audioContext;
+        }
+
+        async function loadWaveform(segId) {
+          const seg = segments.value.find(s => s.id === segId);
+          if (!seg || seg.status !== 'done') return;
+          if (waveformLoading[segId]) return;
+          waveformLoading[segId] = true;
+          try {
+            const res = await fetch(`/api/segments/${segId}/audio?v=${audioVersion[segId] || 0}`);
+            const buf = await res.arrayBuffer();
+            const ctx = getAudioContext();
+            const decoded = await ctx.decodeAudioData(buf);
+            const raw = decoded.getChannelData(0);
+            // Downsample to ~150 points
+            const points = 150;
+            const blockSize = Math.floor(raw.length / points) || 1;
+            const samples = new Float32Array(points);
+            for (let i = 0; i < points; i++) {
+              let sum = 0;
+              const start = i * blockSize;
+              for (let j = start; j < start + blockSize && j < raw.length; j++) {
+                sum += Math.abs(raw[j]);
+              }
+              samples[i] = sum / blockSize;
+            }
+            // Normalize to 0..1
+            let max = 0;
+            for (let i = 0; i < samples.length; i++) { if (samples[i] > max) max = samples[i]; }
+            if (max > 0) { for (let i = 0; i < samples.length; i++) samples[i] /= max; }
+            waveformData[segId] = samples;
+            await nextTick();
+            drawWaveform(segId);
+          } catch (e) {
+            console.error('Failed to load waveform for', segId, e);
+          } finally {
+            waveformLoading[segId] = false;
+          }
+        }
+
+        function drawWaveform(segId) {
+          const canvas = document.getElementById('waveform-' + segId);
+          if (!canvas) return;
+          const data = waveformData[segId];
+          if (!data) return;
+          const seg = segments.value.find(s => s.id === segId);
+          const dpr = window.devicePixelRatio || 1;
+          const rect = canvas.getBoundingClientRect();
+          canvas.width = rect.width * dpr;
+          canvas.height = rect.height * dpr;
+          const ctx = canvas.getContext('2d');
+          ctx.scale(dpr, dpr);
+          ctx.clearRect(0, 0, rect.width, rect.height);
+
+          // Color based on status
+          const isDark = document.documentElement.classList.contains('dark');
+          let color = isDark ? 'rgba(156,163,175,0.5)' : 'rgba(107,114,128,0.4)';
+          if (seg) {
+            if (seg.status === 'done') color = isDark ? 'rgba(52,211,153,0.6)' : 'rgba(16,185,129,0.5)';
+            else if (seg.status === 'error') color = isDark ? 'rgba(248,113,113,0.6)' : 'rgba(239,68,68,0.5)';
+          }
+
+          const barWidth = Math.max(1, rect.width / data.length - 0.5);
+          const gap = rect.width / data.length;
+          const midY = rect.height / 2;
+          ctx.fillStyle = color;
+          for (let i = 0; i < data.length; i++) {
+            const h = Math.max(1, data[i] * (rect.height * 0.8));
+            ctx.fillRect(i * gap, midY - h / 2, barWidth, h);
+          }
+        }
+
+        function drawAllWaveforms() {
+          for (const seg of segments.value) {
+            drawWaveform(seg.id);
+          }
+        }
+
+        let timelineResizeObserver = null;
+
+        function toggleTimeline() {
+          showTimeline.value = !showTimeline.value;
+          if (showTimeline.value) {
+            nextTick(() => {
+              // Measure container width for zoom calculation
+              const el = timelineScrollEl.value;
+              if (el) {
+                timelineContainerWidth.value = el.clientWidth;
+                // Watch for resizes
+                if (timelineResizeObserver) timelineResizeObserver.disconnect();
+                timelineResizeObserver = new ResizeObserver(entries => {
+                  for (const entry of entries) timelineContainerWidth.value = entry.contentRect.width;
+                });
+                timelineResizeObserver.observe(el);
+              }
+              for (const seg of segments.value) {
+                if (seg.status === 'done' && !waveformData[seg.id]) {
+                  loadWaveform(seg.id);
+                } else {
+                  drawWaveform(seg.id);
+                }
+              }
+            });
+          } else {
+            stopTimelinePlayback();
+            if (timelineResizeObserver) { timelineResizeObserver.disconnect(); timelineResizeObserver = null; }
+          }
+        }
+
+        function startTimelinePlayback(startIdx) {
+          timelinePlayingIdx.value = startIdx;
+          timelineCurrentTime.value = 0;
+          timelineIsPlaying.value = true;
+          playTimelineSegment(startIdx);
+          startTimelineAnimLoop();
+        }
+
+        function playTimelineSegment(idx) {
+          // Skip non-done segments
+          while (idx < segments.value.length && segments.value[idx].status !== 'done') {
+            idx++;
+          }
+          if (idx >= segments.value.length) {
+            stopTimelinePlayback();
+            return;
+          }
+          timelinePlayingIdx.value = idx;
+          timelineCurrentTime.value = 0;
+          const seg = segments.value[idx];
+          const player = timelineAudioPlayer.value;
+          if (player) {
+            player.src = `/api/segments/${seg.id}/audio?v=${audioVersion[seg.id] || 0}`;
+            player.play().catch(() => {});
+          }
+        }
+
+        function onTimelineAudioEnded() {
+          if (timelinePlayingIdx.value < 0) return;
+          const next = timelinePlayingIdx.value + 1;
+          if (next < segments.value.length) {
+            playTimelineSegment(next);
+          } else {
+            stopTimelinePlayback();
+          }
+        }
+
+        function onTimelineTimeUpdate() {
+          const player = timelineAudioPlayer.value;
+          if (player) {
+            timelineCurrentTime.value = player.currentTime;
+            scrollTimelineToCursor();
+          }
+        }
+
+        function stopTimelinePlayback() {
+          const player = timelineAudioPlayer.value;
+          if (player) {
+            player.pause();
+            player.removeAttribute('src');
+          }
+          timelinePlayingIdx.value = -1;
+          timelineCurrentTime.value = 0;
+          timelineIsPlaying.value = false;
+          cancelTimelineAnimLoop();
+        }
+
+        function toggleTimelinePlayPause() {
+          if (timelineIsPlaying.value) {
+            // Pause
+            const player = timelineAudioPlayer.value;
+            if (player) player.pause();
+            timelineIsPlaying.value = false;
+            cancelTimelineAnimLoop();
+          } else if (timelinePlayingIdx.value >= 0) {
+            // Resume
+            const player = timelineAudioPlayer.value;
+            if (player) player.play().catch(() => {});
+            timelineIsPlaying.value = true;
+            startTimelineAnimLoop();
+          } else {
+            // Start from beginning
+            startTimelinePlayback(0);
+          }
+        }
+
+        function timelineClickSegment(idx) {
+          startTimelinePlayback(idx);
+        }
+
+        function startTimelineAnimLoop() {
+          cancelTimelineAnimLoop();
+          function tick() {
+            onTimelineTimeUpdate();
+            timelineAnimFrame = requestAnimationFrame(tick);
+          }
+          timelineAnimFrame = requestAnimationFrame(tick);
+        }
+
+        function cancelTimelineAnimLoop() {
+          if (timelineAnimFrame) {
+            cancelAnimationFrame(timelineAnimFrame);
+            timelineAnimFrame = null;
+          }
+        }
+
+        // --- Transcription functions ---
+        async function fetchProjectTranscriptions() {
+          if (!currentProjectId.value) return;
+          try {
+            const res = await fetch(`/api/projects/${currentProjectId.value}/transcriptions`);
+            if (res.ok) {
+              const data = await res.json();
+              // data is {segmentId: transcription}
+              for (const [segId, t] of Object.entries(data)) {
+                transcriptions[segId] = t;
+              }
+            }
+          } catch (e) { console.error('Failed to fetch transcriptions:', e); }
+        }
+
+        async function transcribeSegment(segId) {
+          if (transcribing[segId]) return;
+          transcribing[segId] = true;
+          try {
+            const res = await fetch(`/api/segments/${segId}/transcribe`, { method: 'POST' });
+            if (!res.ok) {
+              const err = await res.json().catch(() => ({}));
+              status.value = err.detail || `Transcription failed (HTTP ${res.status})`;
+              return;
+            }
+            const data = await res.json();
+            transcriptions[segId] = data;
+          } catch (e) {
+            status.value = `Transcription failed: ${e.message}`;
+          } finally {
+            delete transcribing[segId];
+          }
+        }
+
+        async function deleteTranscription(segId) {
+          await fetch(`/api/segments/${segId}/transcription`, { method: 'DELETE' });
+          delete transcriptions[segId];
+          if (expandedTranscript.value === segId) expandedTranscript.value = null;
+        }
+
+        async function transcribeAll() {
+          const toTranscribe = segments.value.filter(s => s.status === 'done' && s.audio_path && !transcriptions[s.id]);
+          if (!toTranscribe.length) {
+            status.value = 'All segments already transcribed';
+            setTimeout(() => { if (!generating.value) status.value = ''; }, 3000);
+            return;
+          }
+          transcribeAllProgress.value = { done: 0, total: toTranscribe.length };
+          let failed = 0;
+          for (const seg of toTranscribe) {
+            status.value = `Transcribing segment ${seg.position} (${transcribeAllProgress.value.done + 1}/${toTranscribe.length})...`;
+            try {
+              await transcribeSegment(seg.id);
+            } catch (e) {
+              failed++;
+            }
+            transcribeAllProgress.value.done++;
+          }
+          const done = transcribeAllProgress.value.done - failed;
+          status.value = `Transcribed ${done} segment${done !== 1 ? 's' : ''}${failed ? ` (${failed} failed)` : ''}`;
+          setTimeout(() => { if (!generating.value) status.value = ''; }, 4000);
+          transcribeAllProgress.value = null;
+        }
+
+        function toggleTranscript(segId) {
+          if (expandedTranscript.value === segId) {
+            expandedTranscript.value = null;
+          } else {
+            expandedTranscript.value = segId;
+          }
+        }
+
+        function seekToWord(segId, wordStart) {
+          const player = segmentAudioPlayer.value;
+          if (!player) return;
+          segmentPlayingId.value = segId;
+          player.src = `/api/segments/${segId}/audio?v=${audioVersion[segId] || 0}#t=${wordStart}`;
+          player.play().catch(() => { segmentPlayingId.value = null; });
+        }
+
+        // Get currently highlighted word index for a segment during timeline playback
+        function getActiveWordIdx(segId) {
+          if (timelinePlayingIdx.value < 0) return -1;
+          const seg = segments.value[timelinePlayingIdx.value];
+          if (!seg || seg.id !== segId) return -1;
+          const t = transcriptions[segId];
+          if (!t || !t.words || !t.words.length) return -1;
+          const ct = timelineCurrentTime.value;
+          // Binary search for the word at current time
+          const words = t.words;
+          for (let i = words.length - 1; i >= 0; i--) {
+            if (ct >= words[i].start && ct <= words[i].end) return i;
+          }
+          return -1;
+        }
+
+        // --- Segment playback ---
+        function toggleSegmentPlay(segId) {
+          const player = segmentAudioPlayer.value;
+          if (!player) return;
+          if (segmentPlayingId.value === segId) {
+            player.pause();
+            player.removeAttribute('src');
+            segmentPlayingId.value = null;
+            return;
+          }
+          segmentPlayingId.value = segId;
+          player.src = `/api/segments/${segId}/audio?v=${audioVersion[segId] || 0}`;
+          player.play().catch(() => { segmentPlayingId.value = null; });
+        }
+
+        function onSegmentAudioEnded() {
+          segmentPlayingId.value = null;
+        }
+
+        // --- Trim needs detection ---
+        function segmentNeedsTrim(seg) {
+          if (seg.status !== 'done') return false;
+          const t = transcriptions[seg.id];
+          if (!t || !t.words || !t.words.length) return false;
+          const firstWordStart = t.words[0].start;
+          const lastWordEnd = t.words[t.words.length - 1].end;
+          const audioDur = seg.duration_seconds || 0;
+          return firstWordStart > 0.3 || (audioDur - lastWordEnd) > 0.5;
+        }
+
+        // --- Trim panel ---
+        async function toggleTrim(segId) {
+          if (expandedTrim.value === segId) {
+            expandedTrim.value = null;
+            return;
+          }
+          expandedTrim.value = segId;
+          await loadTrimWaveform(segId);
+        }
+
+        async function loadTrimWaveform(segId) {
+          const seg = segments.value.find(s => s.id === segId);
+          if (!seg || seg.status !== 'done') return;
+          try {
+            const res = await fetch(`/api/segments/${segId}/audio?v=${audioVersion[segId] || 0}`);
+            const buf = await res.arrayBuffer();
+            const ctx = getAudioContext();
+            const decoded = await ctx.decodeAudioData(buf);
+            const raw = decoded.getChannelData(0);
+            trimAudioDuration.value = Math.round(decoded.duration * 1000);
+            const points = 500;
+            const blockSize = Math.floor(raw.length / points) || 1;
+            const samples = new Float32Array(points);
+            for (let i = 0; i < points; i++) {
+              let sum = 0;
+              const start = i * blockSize;
+              for (let j = start; j < start + blockSize && j < raw.length; j++) {
+                sum += Math.abs(raw[j]);
+              }
+              samples[i] = sum / blockSize;
+            }
+            let max = 0;
+            for (let i = 0; i < samples.length; i++) { if (samples[i] > max) max = samples[i]; }
+            if (max > 0) { for (let i = 0; i < samples.length; i++) samples[i] /= max; }
+            trimWaveformData.value = samples;
+            trimStart.value = 0;
+            trimEnd.value = trimAudioDuration.value;
+            await nextTick();
+            drawTrimWaveform(segId);
+          } catch (e) {
+            console.error('Failed to load trim waveform:', e);
+          }
+        }
+
+        function drawTrimWaveform(segId) {
+          const canvas = document.getElementById('trim-waveform-' + segId);
+          if (!canvas || !trimWaveformData.value) return;
+          const data = trimWaveformData.value;
+          const dpr = window.devicePixelRatio || 1;
+          const rect = canvas.getBoundingClientRect();
+          canvas.width = rect.width * dpr;
+          canvas.height = rect.height * dpr;
+          const ctx = canvas.getContext('2d');
+          ctx.scale(dpr, dpr);
+          ctx.clearRect(0, 0, rect.width, rect.height);
+          const totalMs = trimAudioDuration.value;
+          if (!totalMs) return;
+
+          const barWidth = Math.max(1, rect.width / data.length - 0.5);
+          const gap = rect.width / data.length;
+          const midY = rect.height / 2;
+          const isDark = document.documentElement.classList.contains('dark');
+
+          for (let i = 0; i < data.length; i++) {
+            const ms = (i / data.length) * totalMs;
+            const inRange = ms >= trimStart.value && ms <= trimEnd.value;
+            const h = Math.max(1, data[i] * (rect.height * 0.75));
+            ctx.fillStyle = inRange
+              ? (isDark ? 'rgba(99,102,241,0.7)' : 'rgba(79,70,229,0.6)')
+              : (isDark ? 'rgba(107,114,128,0.25)' : 'rgba(156,163,175,0.3)');
+            ctx.fillRect(i * gap, midY - h / 2, barWidth, h);
+          }
+
+          // Draw word markers
+          const seg = segments.value.find(s => s.id === segId);
+          if (seg) {
+            const t = transcriptions[seg.id];
+            if (t && t.words) {
+              ctx.fillStyle = isDark ? 'rgba(168,85,247,0.6)' : 'rgba(147,51,234,0.4)';
+              for (const w of t.words) {
+                const x = (w.start * 1000 / totalMs) * rect.width;
+                ctx.fillRect(x, rect.height - 14, 1, 14);
+              }
+              ctx.font = `9px system-ui, sans-serif`;
+              ctx.fillStyle = isDark ? 'rgba(168,85,247,0.8)' : 'rgba(147,51,234,0.6)';
+              ctx.textAlign = 'left';
+              for (const w of t.words) {
+                const x = (w.start * 1000 / totalMs) * rect.width;
+                ctx.fillText(w.word, x + 2, rect.height - 3);
+              }
+            }
+          }
+        }
+
+        function autoSuggestTrim() {
+          const segId = expandedTrim.value;
+          if (!segId) return;
+          const t = transcriptions[segId];
+          if (!t || !t.words || !t.words.length) return;
+          const firstStart = t.words[0].start * 1000;
+          const lastEnd = t.words[t.words.length - 1].end * 1000;
+          trimStart.value = Math.max(0, Math.round(firstStart - 50));
+          trimEnd.value = Math.min(trimAudioDuration.value, Math.round(lastEnd + 50));
+          drawTrimWaveform(segId);
+        }
+
+        async function previewTrim() {
+          const segId = expandedTrim.value;
+          const seg = segments.value.find(s => s.id === segId);
+          if (!seg) return;
+          try {
+            const res = await fetch(`/api/segments/${seg.id}/audio?v=${audioVersion[seg.id] || 0}`);
+            const buf = await res.arrayBuffer();
+            const ctx = getAudioContext();
+            const decoded = await ctx.decodeAudioData(buf);
+            const source = ctx.createBufferSource();
+            source.buffer = decoded;
+            source.playbackRate.value = playbackSpeed.value;
+            source.connect(ctx.destination);
+            source.start(0, trimStart.value / 1000, (trimEnd.value - trimStart.value) / 1000);
+          } catch (e) {
+            console.error('Preview failed:', e);
+          }
+        }
+
+        async function applyTrim() {
+          const segId = expandedTrim.value;
+          const seg = segments.value.find(s => s.id === segId);
+          if (!seg) return;
+          trimApplying.value = true;
+          try {
+            const res = await fetch(`/api/segments/${seg.id}/trim`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ start_ms: trimStart.value, end_ms: trimEnd.value }),
+            });
+            if (!res.ok) {
+              const err = await res.json().catch(() => ({}));
+              status.value = err.detail || 'Trim failed';
+              return;
+            }
+            const data = await res.json();
+            updateSegmentInPlace(seg.id, data.segment);
+            audioVersion[seg.id] = (audioVersion[seg.id] || 0) + 1;
+            if (data.transcription) {
+              transcriptions[seg.id] = data.transcription;
+            } else {
+              delete transcriptions[seg.id];
+            }
+            await loadTrimWaveform(seg.id);
+            if (showTimeline.value) loadWaveform(seg.id);
+            status.value = 'Audio trimmed successfully';
+            setTimeout(() => { if (!generating.value) status.value = ''; }, 3000);
+          } catch (e) {
+            status.value = 'Trim request failed: ' + e.message;
+          } finally {
+            trimApplying.value = false;
+          }
+        }
+
+        function onTrimMouseDown(e, handle) {
+          e.preventDefault();
+          const segId = expandedTrim.value;
+          trimDragging.value = handle;
+          const onMove = (me) => {
+            const canvas = document.getElementById('trim-waveform-' + segId);
+            if (!canvas) return;
+            const rect = canvas.getBoundingClientRect();
+            const frac = Math.max(0, Math.min(1, (me.clientX - rect.left) / rect.width));
+            const ms = Math.round(frac * trimAudioDuration.value);
+            if (trimDragging.value === 'start') {
+              trimStart.value = Math.min(ms, trimEnd.value - 50);
+            } else if (trimDragging.value === 'end') {
+              trimEnd.value = Math.max(ms, trimStart.value + 50);
+            }
+            drawTrimWaveform(segId);
+          };
+          const onUp = () => {
+            trimDragging.value = null;
+            document.removeEventListener('mousemove', onMove);
+            document.removeEventListener('mouseup', onUp);
+          };
+          document.addEventListener('mousemove', onMove);
+          document.addEventListener('mouseup', onUp);
+        }
+
+        // --- Global voice patching before generation ---
+        async function patchGlobalVoice(segmentIds) {
+          for (const segId of segmentIds) {
+            const seg = segments.value.find(s => s.id === segId);
+            if (!seg) continue;
+            const body = {};
+            if (seg.service === 'dia' && globalVoiceSampleId.value !== null && globalVoiceSampleId.value !== undefined) {
+              body.voice_sample_id = globalVoiceSampleId.value || 0;
+            }
+            if (seg.service === 'magpie' && globalMagpieVoice.value) {
+              body.magpie_voice = globalMagpieVoice.value;
+            }
+            if (Object.keys(body).length) {
+              await fetch(`/api/segments/${seg.id}`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(body),
+              });
+            }
+          }
+        }
+
+        // Apply playback speed to any audio element when it starts playing
+        function onAudioPlay(e) {
+          if (e.target.tagName === 'AUDIO') e.target.playbackRate = playbackSpeed.value;
+        }
+
+        onMounted(async () => {
+          document.addEventListener('play', onAudioPlay, true);
+          await fetchProjects();
+          await fetchVoiceSamples();
+          if (projects.value.length) {
+            currentProjectId.value = projects.value[0].id;
+            await fetchSegments();
+            await fetchProjectTranscriptions();
+          }
+          connectWs();
+        });
+
+        onUnmounted(() => {
+          document.removeEventListener('play', onAudioPlay, true);
+          if (wsReconnectTimer) clearTimeout(wsReconnectTimer);
+          if (ws) ws.close();
+          cancelTimelineAnimLoop();
+          if (timelineResizeObserver) { timelineResizeObserver.disconnect(); timelineResizeObserver = null; }
+          if (audioContext) { audioContext.close().catch(() => {}); audioContext = null; }
+        });
+
+        // Update all currently active audio elements when speed changes
+        watch(playbackSpeed, (speed) => {
+          localStorage.setItem('playbackSpeed', String(speed));
+          document.querySelectorAll('audio').forEach(el => { el.playbackRate = speed; });
+        });
+
+        // Fetch Magpie voices when selecting Magpie for import
+        watch(importService, (val) => {
+          if (val === 'magpie' && !magpieVoices.value.length) fetchMagpieVoices();
+        });
+
+        // Redraw waveforms when segments change
+        watch(segments, () => {
+          if (showTimeline.value) nextTick(() => drawAllWaveforms());
+        }, { deep: true });
+
+        // Draw waveforms when timeline opens
+        watch(showTimeline, (val) => {
+          if (val) nextTick(() => drawAllWaveforms());
+        });
+
+        return {
+          darkMode, toggleDark, playbackSpeed,
+          projects, currentProjectId, showNewProject, newProjectName, confirmDeleteProject,
+          segments, showImport, importText, importService, importMode,
+          articleText, articleSegments, articleChunks, articleSegmentsFlat, articleChunksProcessed, articleChunksErrorCount, articleProcessing, articleStatus,
+          retryChunk, retryAllFailedChunks, removeArticleSegment, autoResizeTextarea,
+          editing, editText, generating, status,
+          expandedVariants, expandedOriginal, variantsMap, regenText,
+          showAddSegment, addText, confirmDeleteSeg, confirmDeleteVar, confirmClear,
+          dragId, dragOverId, insertAtPosition, insertText, insertSegment, cancelInsert,
+          showExport, exportFormat, exportGapMs, exportFadeMs, exportNormalize,
+          showVoices, voiceSamples, magpieVoices, vsName, vsTranscript, vsFileInput, confirmDeleteVs,
+          hasAudio, doneCount, errorCount, pendingCount, totalDuration,
+          segmentPlayingId, segmentAudioPlayer, toggleSegmentPlay, onSegmentAudioEnded,
+          globalVoiceSampleId, globalMagpieVoice,
+          expandedTrim, trimStart, trimEnd, trimWaveformData, trimAudioDuration, trimApplying, trimDragging,
+          segmentNeedsTrim, toggleTrim, autoSuggestTrim, previewTrim, applyTrim, onTrimMouseDown,
+          showScriptEditor, scriptLines, scriptSaving, scriptSyncStatus, scriptAudioPlayer,
+          showTimeline, timelineAudioPlayer, timelinePlayingIdx, timelineCurrentTime, timelineIsPlaying, timelineScrollEl,
+          timelineTotalSeconds, timelineOffsets, timelineWidths, timelineCursorPercent, timelineHasDoneSegments,
+          timelineZoom, timelineInnerWidth, timelineViewportRatio, timelineViewportLeft,
+          onTimelineScroll, onMinimapClick,
+          cancelling, genIndex, genTotal, genEstimate, genProgress, audioVersion,
+          fmtDuration, fetchProjects, createProject: createProjectFn, switchProject, deleteProject,
+          fetchSegments, toggleImport, doImport, processArticle, acceptArticleSegments, addSegment,
+          startEdit, saveEdit, updateService, deleteSegment, clearAllSegments,
+          generateOne, generateAll, regenerate, cancelGeneration, retryFailed,
+          selectVariant, deleteVariantBtn, toggleVariants,
+          exportAudio,
+          fetchVoiceSamples, fetchMagpieVoices, uploadVoiceSample, deleteVoiceSample,
+          toggleScriptEditor, openScriptEditor, closeScriptEditor, saveScript,
+          addScriptLine, removeScriptLine, splitScriptLine, playScriptLine,
+          scriptLineWords, scriptLineEstDuration,
+          onDragStart, onDragOver, onDragEnd, onDrop,
+          toggleTimeline, startTimelinePlayback, stopTimelinePlayback,
+          toggleTimelinePlayPause, timelineClickSegment,
+          onTimelineAudioEnded, onTimelineTimeUpdate,
+          transcriptions, transcribing, expandedTranscript, transcribeAllProgress, wordTrackScrollEl,
+          transcribeSegment, deleteTranscription, transcribeAll, toggleTranscript, seekToWord, getActiveWordIdx,
+          syncWordTrackScroll,
+        };
+      }
+    }).mount('#app');
+  </script>
+</body>
+</html>

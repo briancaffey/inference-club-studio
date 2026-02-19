@@ -134,13 +134,88 @@ export interface Take {
   updated_at: string
 }
 
+export type ProjectType = 'video_to_video' | 'narration'
+
 export interface Project {
   id: string
   name: string
+  project_type: ProjectType
   description: string | null
   cut_count?: number
+  segment_count?: number
   metadata?: Record<string, unknown> | null
   cuts?: Cut[]
   created_at: string
   updated_at: string
+}
+
+export interface InferenceServiceHealth {
+  key: string
+  name: string
+  url: string
+  healthy: boolean
+  error: string | null
+}
+
+export interface InferenceServicesHealthResponse {
+  status: 'ok' | 'degraded'
+  checked_at: string
+  healthy_services: number
+  total_services: number
+  services: InferenceServiceHealth[]
+}
+
+export type NarrationService = 'dia' | 'magpie'
+export type NarrationSegmentStatus = 'pending' | 'generating' | 'done' | 'error'
+
+export interface NarrationSegment {
+  id: number
+  project_id: string
+  position: number
+  text: string
+  sanitized_text: string
+  service: NarrationService | string
+  status: NarrationSegmentStatus | string
+  audio_path: string | null
+  duration_seconds: number | null
+  error_message: string | null
+  selected_variant_id: number | null
+  voice_sample_id: number | null
+  magpie_voice: string | null
+  original_text: string | null
+  created_at: string
+  updated_at: string
+}
+
+export interface NarrationVariant {
+  id: number
+  segment_id: number
+  text: string
+  sanitized_text: string
+  service: NarrationService | string
+  audio_path: string | null
+  duration_seconds: number | null
+  created_at: string
+}
+
+export interface NarrationVoiceSample {
+  id: number
+  name: string
+  audio_path: string
+  transcript: string
+  created_at: string
+}
+
+export interface NarrationWord {
+  word: string
+  start: number
+  end: number
+}
+
+export interface NarrationTranscription {
+  id: number
+  segment_id: number
+  text: string
+  words: NarrationWord[]
+  created_at: string
 }

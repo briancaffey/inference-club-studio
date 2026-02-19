@@ -11,7 +11,7 @@ onMounted(() => {
     <div class="flex items-center justify-between">
       <PageHeader
         title="Projects"
-        description="Manage your video cut projects"
+        description="Manage narration and video-to-video projects"
       />
       <CreateProjectDialog />
     </div>

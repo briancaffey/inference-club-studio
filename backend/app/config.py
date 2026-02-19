@@ -10,6 +10,9 @@ class Settings(BaseSettings):
     invokeai_board_id: str | None = None
     comfyui_url: str = "http://192.168.6.19:8188"
     qwen_vl_url: str = "http://192.168.5.253:8000"
+    dia_url: str = "http://192.168.5.253:7860"
+    magpie_url: str = "http://192.168.6.3:9000"
+    stt_url: str = "http://192.168.5.96:8001"
     cors_origins: list[str] = ["*"]
     debug: bool = False
 

@@ -8,5 +8,11 @@ from app.models.cut_ai import (  # noqa: F401
     PromptDraft,
 )
 from app.models.generation import Generation, GenerationStatus  # noqa: F401
-from app.models.project import Project  # noqa: F401
+from app.models.narration import (  # noqa: F401
+    NarrationSegment,
+    NarrationTranscription,
+    NarrationVariant,
+    NarrationVoiceSample,
+)
+from app.models.project import Project, ProjectType  # noqa: F401
 from app.models.take import Take, TakeStatus  # noqa: F401

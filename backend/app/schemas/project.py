@@ -3,9 +3,12 @@ from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict
 
+from app.models.project import ProjectType
+
 
 class ProjectCreate(BaseModel):
     name: str
+    project_type: ProjectType = ProjectType.VIDEO_TO_VIDEO
     description: str | None = None
     metadata: dict | None = None
 
@@ -21,8 +24,10 @@ class ProjectSummary(BaseModel):
 
     id: uuid.UUID
     name: str
+    project_type: ProjectType
     description: str | None = None
     cut_count: int = 0
+    segment_count: int = 0
     created_at: datetime
     updated_at: datetime
 
@@ -32,8 +37,10 @@ class ProjectDetail(BaseModel):
 
     id: uuid.UUID
     name: str
+    project_type: ProjectType
     description: str | None = None
     metadata: dict | None = None
+    segment_count: int = 0
     cuts: list["CutRead"] = []
     created_at: datetime
     updated_at: datetime

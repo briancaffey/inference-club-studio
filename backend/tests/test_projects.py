@@ -6,7 +6,9 @@ def test_create_project(client):
     assert resp.status_code == 201
     data = resp.json()
     assert data["name"] == "Test Project"
+    assert data["project_type"] == "video_to_video"
     assert data["cut_count"] == 0
+    assert data["segment_count"] == 0
     assert "id" in data
 
 
@@ -17,6 +19,18 @@ def test_create_project_with_description(client):
     )
     assert resp.status_code == 201
     assert resp.json()["description"] == "A great film"
+
+
+def test_create_narration_project(client):
+    resp = client.post(
+        "/api/v1/projects",
+        json={"name": "Narration Project", "project_type": "narration"},
+    )
+    assert resp.status_code == 201
+    data = resp.json()
+    assert data["project_type"] == "narration"
+    assert data["cut_count"] == 0
+    assert data["segment_count"] == 0
 
 
 def test_list_projects_empty(client):
@@ -46,6 +60,8 @@ def test_get_project(client, db):
     assert resp.status_code == 200
     data = resp.json()
     assert data["name"] == "Detail Test"
+    assert data["project_type"] == "video_to_video"
+    assert data["segment_count"] == 0
     assert data["cuts"] == []
 
 

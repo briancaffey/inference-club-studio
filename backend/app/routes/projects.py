@@ -10,7 +10,8 @@ from sqlalchemy.orm import Session
 from app.config import settings
 from app.database import get_db
 from app.models.cut import Cut
-from app.models.project import Project
+from app.models.narration import NarrationSegment
+from app.models.project import Project, ProjectType
 from app.schemas.cut import CutRead
 from app.schemas.project import (
     ProjectCreate,
@@ -28,6 +29,7 @@ router = APIRouter(prefix="/projects", tags=["projects"])
 def create_project(data: ProjectCreate, db: Session = Depends(get_db)):
     project = Project(
         name=data.name,
+        project_type=data.project_type.value,
         description=data.description,
         metadata_=data.metadata,
     )
@@ -38,8 +40,10 @@ def create_project(data: ProjectCreate, db: Session = Depends(get_db)):
     return ProjectSummary(
         id=project.id,
         name=project.name,
+        project_type=project.project_type,
         description=project.description,
         cut_count=0,
+        segment_count=0,
         created_at=project.created_at,
         updated_at=project.updated_at,
     )
@@ -47,23 +51,29 @@ def create_project(data: ProjectCreate, db: Session = Depends(get_db)):
 
 @router.get("", response_model=list[ProjectSummary])
 def list_projects(db: Session = Depends(get_db)):
-    rows = (
-        db.query(Project, func.count(Cut.id).label("cut_count"))
-        .outerjoin(Cut, Cut.project_id == Project.id)
-        .group_by(Project.id)
-        .order_by(Project.created_at.desc())
+    projects = db.query(Project).order_by(Project.created_at.desc()).all()
+    cut_counts = dict(
+        db.query(Cut.project_id, func.count(Cut.id))
+        .group_by(Cut.project_id)
+        .all()
+    )
+    segment_counts = dict(
+        db.query(NarrationSegment.project_id, func.count(NarrationSegment.id))
+        .group_by(NarrationSegment.project_id)
         .all()
     )
     return [
         ProjectSummary(
             id=project.id,
             name=project.name,
+            project_type=project.project_type,
             description=project.description,
-            cut_count=cut_count,
+            cut_count=cut_counts.get(project.id, 0),
+            segment_count=segment_counts.get(project.id, 0),
             created_at=project.created_at,
             updated_at=project.updated_at,
         )
-        for project, cut_count in rows
+        for project in projects
     ]
 
 
@@ -72,12 +82,20 @@ def get_project(project_id: uuid.UUID, db: Session = Depends(get_db)):
     project = db.query(Project).filter(Project.id == project_id).first()
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
+    segment_count = (
+        db.query(func.count(NarrationSegment.id))
+        .filter(NarrationSegment.project_id == project.id)
+        .scalar()
+    )
+    cuts = project.cuts if project.project_type == ProjectType.VIDEO_TO_VIDEO.value else []
     return ProjectDetail(
         id=project.id,
         name=project.name,
+        project_type=project.project_type,
         description=project.description,
         metadata=project.metadata_,
-        cuts=[CutRead.model_validate(c) for c in project.cuts],
+        segment_count=segment_count,
+        cuts=[CutRead.model_validate(c) for c in cuts],
         created_at=project.created_at,
         updated_at=project.updated_at,
     )
@@ -104,11 +122,18 @@ def update_project(
     cut_count = (
         db.query(func.count(Cut.id)).filter(Cut.project_id == project.id).scalar()
     )
+    segment_count = (
+        db.query(func.count(NarrationSegment.id))
+        .filter(NarrationSegment.project_id == project.id)
+        .scalar()
+    )
     return ProjectSummary(
         id=project.id,
         name=project.name,
+        project_type=project.project_type,
         description=project.description,
         cut_count=cut_count,
+        segment_count=segment_count,
         created_at=project.created_at,
         updated_at=project.updated_at,
     )

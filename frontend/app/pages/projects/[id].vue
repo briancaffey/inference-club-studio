@@ -13,6 +13,9 @@ const previewOpen = ref(false)
 const editing = ref(false)
 const editName = ref('')
 const editDescription = ref('')
+const isNarrationProject = computed(
+  () => store.currentProject?.project_type === 'narration',
+)
 
 // Fetch project
 onMounted(() => {
@@ -162,19 +165,25 @@ async function saveEdit() {
     </div>
 
     <template v-else-if="store.currentProject">
-      <CutUploadZone :project-id="projectId" />
-
-      <div v-if="!store.currentProject.cuts?.length" class="py-8 text-center">
-        <p class="text-muted-foreground">No cuts yet. Upload video files above.</p>
+      <div v-if="isNarrationProject" class="space-y-3">
+        <NarrationWorkspace :project-id="projectId" />
       </div>
 
-      <CutList
-        v-else
-        :cuts="store.currentProject.cuts"
-        :project-id="projectId"
-        @preview="openPreview"
-        @reorder="handleReorder"
-      />
+      <template v-else>
+        <CutUploadZone :project-id="projectId" />
+
+        <div v-if="!store.currentProject.cuts?.length" class="py-8 text-center">
+          <p class="text-muted-foreground">No cuts yet. Upload video files above.</p>
+        </div>
+
+        <CutList
+          v-else
+          :cuts="store.currentProject.cuts"
+          :project-id="projectId"
+          @preview="openPreview"
+          @reorder="handleReorder"
+        />
+      </template>
     </template>
 
     <VideoPreviewDialog

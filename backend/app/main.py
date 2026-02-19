@@ -7,7 +7,7 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.config import settings
-from app.routes import cut_ai, cuts, generations, health, projects, takes
+from app.routes import cut_ai, cuts, generations, health, narration, projects, takes
 
 logger = logging.getLogger(__name__)
 
@@ -51,3 +51,4 @@ app.include_router(cuts.router, prefix="/api/v1")
 app.include_router(cut_ai.router, prefix="/api/v1")
 app.include_router(generations.router, prefix="/api/v1")
 app.include_router(takes.router, prefix="/api/v1")
+app.include_router(narration.router)

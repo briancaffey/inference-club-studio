@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models.cut import Cut, CutStatus
 from app.models.cut_ai import CutAIRun
-from app.models.project import Project
+from app.models.project import Project, ProjectType
 from app.schemas.cut_ai import (
     CutAIRegenerateRequest,
     CutAIRunRead,
@@ -36,6 +36,11 @@ def _get_project_or_404(project_id: uuid.UUID, db: Session) -> Project:
     project = db.query(Project).filter(Project.id == project_id).first()
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
+    if project.project_type != ProjectType.VIDEO_TO_VIDEO.value:
+        raise HTTPException(
+            status_code=400,
+            detail="Cut AI is only supported for video-to-video projects",
+        )
     return project
 
 

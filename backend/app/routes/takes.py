@@ -10,7 +10,7 @@ from app.config import settings
 from app.database import get_db
 from app.models.cut import Cut
 from app.models.generation import Generation, GenerationStatus
-from app.models.project import Project
+from app.models.project import Project, ProjectType
 from app.models.take import Take
 from app.schemas.take import TakeCreate, TakeRead
 from app.tasks.takes import generate_video_take
@@ -27,6 +27,11 @@ def _get_project_or_404(project_id: uuid.UUID, db: Session) -> Project:
     project = db.query(Project).filter(Project.id == project_id).first()
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
+    if project.project_type != ProjectType.VIDEO_TO_VIDEO.value:
+        raise HTTPException(
+            status_code=400,
+            detail="Take operations are only supported for video-to-video projects",
+        )
     return project
 
 

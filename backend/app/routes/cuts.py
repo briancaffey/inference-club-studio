@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 from app.config import settings
 from app.database import get_db
 from app.models.cut import Cut
-from app.models.project import Project
+from app.models.project import Project, ProjectType
 from app.schemas.cut import CutRead, CutReorderRequest, CutUploadResponse
 from app.tasks.cuts import process_cut_metadata
 from app.utils.media import ensure_media_dir
@@ -23,6 +23,11 @@ def _get_project_or_404(project_id: uuid.UUID, db: Session) -> Project:
     project = db.query(Project).filter(Project.id == project_id).first()
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
+    if project.project_type != ProjectType.VIDEO_TO_VIDEO.value:
+        raise HTTPException(
+            status_code=400,
+            detail="Cut operations are only supported for video-to-video projects",
+        )
     return project
 
 
