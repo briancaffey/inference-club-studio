@@ -26,10 +26,10 @@ FIRST_FRAME_PROFILE = PromptProfile(
 )
 
 FLUX_STYLE_CONTENT_PROFILE = PromptProfile(
-    key="flux_style_content_prompt_v1",
-    temperature=0.4,
+    key="flux_style_content_prompt_v2",
+    temperature=0.65,
     top_p=0.8,
-    max_tokens=500,
+    max_tokens=700,
 )
 
 
@@ -104,16 +104,27 @@ def build_flux_style_content_prompt(
     frame_context = first_frame_description or "N/A"
 
     return (
-        "Write a single production-ready prompt for Flux image generation.\n"
-        "Goal: preserve content while applying the requested style.\n"
+        "Write one production-ready Flux prompt that REIMAGINES the scene through "
+        "the requested style while preserving the original composition.\n"
         "Output only the final prompt text. No commentary, no markdown.\n\n"
         f"Style instruction:\n{style}\n\n"
         f"Content instruction:\n{content}\n\n"
         f"Clip context (optional):\n{clip_context}\n\n"
         f"First-frame context (optional):\n{frame_context}\n\n"
-        "Requirements for the final prompt:\n"
-        "- Must include subject, setting, composition, lighting, palette, and mood.\n"
-        "- Must preserve core scene content while translating style.\n"
-        "- Avoid camera-motion language that implies video.\n"
-        "- Keep it between 60 and 120 words."
+        "Hard rules:\n"
+        "- Preserve composition anchors: subject count, pose/action intent, "
+        "camera angle, framing, depth, and relative object placement.\n"
+        "- Do NOT just append style words at the end.\n"
+        "- Rewrite the visual world so style is expressed in wardrobe, props, "
+        "materials, architecture, lighting design, and color treatment.\n"
+        "- Keep the same core narrative moment, but transform details to match "
+        "the style direction.\n"
+        "- If style implies specific era/technology/culture, introduce concrete "
+        "style artifacts (e.g. clothing, accessories, surfaces, devices).\n"
+        "- Avoid video/cinematic motion instructions; this is a single image.\n\n"
+        "Target output quality:\n"
+        "- Dense, specific visual language suitable for direct image generation.\n"
+        "- Include: subject styling, environment styling, composition/framing, "
+        "lighting, palette, texture/material cues, and mood.\n"
+        "- Keep it roughly 90-170 words."
     )

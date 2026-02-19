@@ -20,6 +20,7 @@ const store = useGenerationsStore()
 const deleting = ref(false)
 const previewOpen = ref(false)
 
+const sourceSrc = computed(() => mediaUrl(props.generation.reference_frame_path))
 const outputSrc = computed(() => mediaUrl(props.generation.output_image_path))
 
 const isProcessing = computed(() =>
@@ -139,12 +140,49 @@ async function handleDelete() {
 
       <!-- Full preview dialog -->
       <Dialog v-model:open="previewOpen">
-        <DialogContent class="max-w-3xl">
+        <DialogContent class="!w-[75vw] !max-w-[75vw] sm:!max-w-[75vw]">
           <DialogHeader>
-            <DialogTitle class="line-clamp-1">{{ generation.prompt }}</DialogTitle>
+            <DialogTitle>Source vs Generated</DialogTitle>
           </DialogHeader>
-          <div v-if="outputSrc" class="flex justify-center">
-            <img :src="outputSrc" alt="Generated output" class="max-h-[70vh] rounded object-contain" />
+
+          <div class="grid gap-3 md:grid-cols-2">
+            <div class="space-y-2">
+              <p class="text-xs font-medium text-muted-foreground">Original Source Image</p>
+              <div class="flex min-h-[420px] items-center justify-center rounded border bg-muted/30 p-2">
+                <img
+                  v-if="sourceSrc"
+                  :src="sourceSrc"
+                  alt="Source image"
+                  class="max-h-[68vh] w-full rounded object-contain"
+                />
+                <p v-else class="text-xs text-muted-foreground">No source image available</p>
+              </div>
+            </div>
+
+            <div class="space-y-2">
+              <p class="text-xs font-medium text-muted-foreground">Generated Image</p>
+              <div class="flex min-h-[420px] items-center justify-center rounded border bg-muted/30 p-2">
+                <img
+                  v-if="outputSrc"
+                  :src="outputSrc"
+                  alt="Generated output"
+                  class="max-h-[68vh] w-full rounded object-contain"
+                />
+                <p v-else class="text-xs text-muted-foreground">No generated image available</p>
+              </div>
+            </div>
+          </div>
+
+          <div class="space-y-2 rounded-md border p-3">
+            <div class="flex items-center justify-between">
+              <p class="text-xs font-medium text-muted-foreground">Prompt</p>
+              <CopyButton
+                :text="generation.prompt"
+                tooltip="Copy prompt"
+                class="h-7 w-7"
+              />
+            </div>
+            <p class="whitespace-pre-wrap text-sm">{{ generation.prompt }}</p>
           </div>
         </DialogContent>
       </Dialog>
