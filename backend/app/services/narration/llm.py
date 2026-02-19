@@ -17,9 +17,13 @@ import httpx
 
 logger = logging.getLogger(__name__)
 
-LLM_BASE_URL = os.environ.get("LLM_BASE_URL", "http://192.168.6.19:8002/v1")
-LLM_MODEL = os.environ.get("LLM_MODEL", "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16")
-LLM_API_KEY = os.environ.get("LLM_API_KEY", "not-needed")
+OPENAI_BASE_URL = os.environ.get("OPENAI_BASE_URL", "http://192.168.6.19:8002/v1")
+OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16")
+OPENAI_API_KEY = (
+    os.environ.get("OPENAI_API_KEY")
+    or os.environ.get("GROQ_API_KEY")
+    or "not-needed"
+)
 LLM_MAX_TOKENS = int(os.environ.get("LLM_MAX_TOKENS", "4096"))
 LLM_TEMPERATURE = float(os.environ.get("LLM_TEMPERATURE", "0.3"))
 LLM_CONCURRENCY = int(os.environ.get("LLM_CONCURRENCY", "8"))
@@ -108,11 +112,11 @@ def split_into_chunks(text: str, max_chars: int = 500, min_chars: int = 100) -> 
 
 async def _call_llm_chunk(client: httpx.AsyncClient, chunk: str) -> str:
     """Send a single chunk to the LLM for TTS cleanup. Returns raw content."""
-    base_url = LLM_BASE_URL.rstrip("/")
+    base_url = OPENAI_BASE_URL.rstrip("/")
 
     payload = {
         "chat_template_kwargs": {"enable_thinking": False},
-        "model": LLM_MODEL,
+        "model": OPENAI_MODEL,
         "messages": [
             {"role": "system", "content": CHUNK_PROMPT},
             {"role": "user", "content": chunk},
@@ -124,7 +128,7 @@ async def _call_llm_chunk(client: httpx.AsyncClient, chunk: str) -> str:
     resp = await client.post(
         f"{base_url}/chat/completions",
         json=payload,
-        headers={"Authorization": f"Bearer {LLM_API_KEY}"},
+        headers={"Authorization": f"Bearer {OPENAI_API_KEY}"},
     )
 
     if resp.status_code != 200:
@@ -279,7 +283,7 @@ async def split_article_for_tts_streaming(article_text: str):
             await asyncio.gather(*tasks)
 
     except httpx.ConnectError:
-        base_url = LLM_BASE_URL.rstrip("/")
+        base_url = OPENAI_BASE_URL.rstrip("/")
         yield {"phase": "error", "detail": f"Could not connect to LLM at {base_url}. Is the service running?"}
         return
     except Exception as e:

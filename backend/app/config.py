@@ -6,6 +6,9 @@ class Settings(BaseSettings):
     redis_url: str = "redis://redis:6379/0"
     media_dir: str = "/app/media"
     openai_api_key: str = ""
+    groq_api_key: str = ""
+    openai_base_url: str = "http://192.168.6.19:8002/v1"
+    openai_model: str = "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16"
     invokeai_url: str = "http://192.168.5.173:9090"
     invokeai_board_id: str | None = None
     comfyui_url: str = "http://192.168.6.19:8188"

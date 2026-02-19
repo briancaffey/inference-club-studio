@@ -64,6 +64,16 @@ def health_check():
 async def services_health_check():
     services: list[tuple[str, str, str, ServiceCheck]] = [
         (
+            "llm",
+            "LLM (OpenAI API)",
+            settings.openai_base_url,
+            partial(
+                _check_http_reachable,
+                settings.openai_base_url,
+                ("/models", "/chat/completions", "/"),
+            ),
+        ),
+        (
             "invokeai",
             "InvokeAI",
             settings.invokeai_url,

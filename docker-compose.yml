@@ -3,6 +3,9 @@ x-backend-env: &backend-env
   REDIS_URL: redis://redis:6379/0
   MEDIA_DIR: /app/media
   OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+  GROQ_API_KEY: ${GROQ_API_KEY:-}
+  OPENAI_BASE_URL: ${OPENAI_BASE_URL:-http://192.168.6.19:8002/v1}
+  OPENAI_MODEL: ${OPENAI_MODEL:-nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16}
   INVOKEAI_URL: ${INVOKEAI_URL:-http://192.168.5.173:9090}
   INVOKEAI_BOARD_ID: ${INVOKEAI_BOARD_ID:-bc97c0fe-13b5-4a90-a87c-9745ed4dea39}
   COMFYUI_URL: ${COMFYUI_URL:-http://192.168.6.19:8188}
@@ -10,9 +13,6 @@ x-backend-env: &backend-env
   DIA_URL: ${DIA_URL:-http://192.168.5.253:7860}
   MAGPIE_URL: ${MAGPIE_URL:-http://192.168.6.3:9000}
   STT_URL: ${STT_URL:-http://192.168.5.96:8001}
-  LLM_BASE_URL: ${LLM_BASE_URL:-http://192.168.6.19:8002/v1}
-  LLM_MODEL: ${LLM_MODEL:-nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16}
-  LLM_API_KEY: ${LLM_API_KEY:-not-needed}
 
 x-backend-common: &backend-common
   build:

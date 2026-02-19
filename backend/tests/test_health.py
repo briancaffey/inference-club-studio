@@ -37,11 +37,12 @@ def test_services_health_all_healthy(client, monkeypatch):
     assert response.status_code == 200
     body = response.json()
     assert body["status"] == "ok"
-    assert body["healthy_services"] == 6
-    assert body["total_services"] == 6
-    assert len(body["services"]) == 6
+    assert body["healthy_services"] == 7
+    assert body["total_services"] == 7
+    assert len(body["services"]) == 7
     assert all(service["healthy"] is True for service in body["services"])
     assert {s["key"] for s in body["services"]} == {
+        "llm",
         "invokeai",
         "comfyui",
         "qwen_vl",
@@ -71,6 +72,6 @@ def test_services_health_degraded(client, monkeypatch):
     assert response.status_code == 200
     body = response.json()
     assert body["status"] == "degraded"
-    assert body["healthy_services"] == 5
-    assert body["total_services"] == 6
+    assert body["healthy_services"] == 6
+    assert body["total_services"] == 7
     assert any(service["healthy"] is False for service in body["services"])
