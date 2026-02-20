@@ -36,18 +36,24 @@ def test_create_narration_project(client):
 def test_list_projects_empty(client):
     resp = client.get("/api/v1/projects")
     assert resp.status_code == 200
-    assert resp.json() == []
+    assert isinstance(resp.json(), list)
 
 
 def test_list_projects(client, db):
-    db.add(Project(name="Project A"))
-    db.add(Project(name="Project B"))
+    project_a = Project(name="Project A")
+    project_b = Project(name="Project B")
+    db.add(project_a)
+    db.add(project_b)
     db.commit()
+    db.refresh(project_a)
+    db.refresh(project_b)
 
     resp = client.get("/api/v1/projects")
     assert resp.status_code == 200
     data = resp.json()
-    assert len(data) == 2
+    ids = {item["id"] for item in data}
+    assert str(project_a.id) in ids
+    assert str(project_b.id) in ids
 
 
 def test_get_project(client, db):

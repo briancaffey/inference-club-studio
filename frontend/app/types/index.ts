@@ -179,6 +179,9 @@ export interface NarrationSegment {
   audio_path: string | null
   duration_seconds: number | null
   error_message: string | null
+  quality_score: number | null
+  needs_review: boolean
+  generation_attempts: number
   selected_variant_id: number | null
   voice_sample_id: number | null
   magpie_voice: string | null
@@ -203,6 +206,16 @@ export interface NarrationVoiceSample {
   name: string
   audio_path: string
   transcript: string
+  created_at: string
+}
+
+export interface NarrationVoiceSampleDraft {
+  id: string
+  audio_path: string
+  original_filename: string
+  transcription: string
+  words: NarrationWord[]
+  duration_seconds: number
   created_at: string
 }
 

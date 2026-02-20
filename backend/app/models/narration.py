@@ -1,11 +1,24 @@
 import uuid
 from datetime import datetime, timezone
+from typing import TYPE_CHECKING
 
-from sqlalchemy import DateTime, Float, ForeignKey, Index, Integer, String, Text
+from sqlalchemy import (
+    Boolean,
+    DateTime,
+    Float,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+)
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
+
+if TYPE_CHECKING:
+    from app.models.project import Project
 
 
 class NarrationSegment(Base):
@@ -20,7 +33,9 @@ class NarrationSegment(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     project_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("projects.id", ondelete="CASCADE"), nullable=False
+        UUID(as_uuid=True),
+        ForeignKey("projects.id", ondelete="CASCADE"),
+        nullable=False,
     )
     position: Mapped[int] = mapped_column(Integer, nullable=False)
     text: Mapped[str] = mapped_column(Text, nullable=False)
@@ -30,6 +45,13 @@ class NarrationSegment(Base):
     audio_path: Mapped[str | None] = mapped_column(String(1000), nullable=True)
     duration_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    quality_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    needs_review: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    generation_attempts: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+    )
     selected_variant_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     voice_sample_id: Mapped[int | None] = mapped_column(
         Integer,
@@ -47,7 +69,7 @@ class NarrationSegment(Base):
         onupdate=lambda: datetime.now(timezone.utc),
     )
 
-    project: Mapped["Project"] = relationship(back_populates="narration_segments")  # noqa: F821
+    project: Mapped["Project"] = relationship(back_populates="narration_segments")
     variants: Mapped[list["NarrationVariant"]] = relationship(
         back_populates="segment",
         cascade="all, delete-orphan",

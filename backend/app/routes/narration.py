@@ -4,7 +4,6 @@ import logging
 import os
 import re
 import shutil
-import time
 import uuid
 from contextlib import suppress
 from dataclasses import dataclass, field
@@ -12,6 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import httpx
+import redis.asyncio as redis_async
 from fastapi import (
     APIRouter,
     Depends,
@@ -23,6 +23,7 @@ from fastapi import (
     WebSocket,
     WebSocketDisconnect,
 )
+from fastapi.encoders import jsonable_encoder
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy import func
@@ -37,12 +38,26 @@ from app.models.narration import (
     NarrationVoiceSample,
 )
 from app.models.project import Project, ProjectType
-from app.services.narration.audio import concatenate_segments, export_audio, trim_audio
-from app.services.narration.dia import generate as dia_generate
+from app.services.narration.audio import (
+    concatenate_segments,
+    export_audio,
+    load_and_normalize,
+    trim_audio,
+)
 from app.services.narration.dia import get_wav_duration
+from app.services.narration.events import (
+    NARRATION_EVENTS_CHANNEL,
+    get_narration_active_job,
+    increment_narration_queue_depth,
+    init_narration_job,
+    is_narration_job_cancelled,
+    mark_narration_job_cancelled,
+    narration_queue_status_payload,
+)
 from app.services.narration.magpie import list_voices
-from app.services.narration.magpie import generate as magpie_generate
 from app.services.narration.sanitize import sanitize_text
+from app.services.narration.stt import transcribe_audio_file
+from app.tasks.narration import generate_narration_segment_task
 
 logger = logging.getLogger(__name__)
 
@@ -51,10 +66,22 @@ router = APIRouter(tags=["narration"])
 STT_URL = os.environ.get("STT_URL", "http://192.168.5.96:8001")
 NARRATION_ROOT = Path(settings.media_dir) / "narration"
 VOICE_SAMPLES_DIR = NARRATION_ROOT / "voice_samples"
-
-
-def _project_output_dir(project_id: uuid.UUID) -> Path:
-    return Path(settings.media_dir) / str(project_id) / "narration"
+VOICE_SAMPLE_DRAFTS_DIR = VOICE_SAMPLES_DIR / "drafts"
+VOICE_SAMPLE_ALLOWED_EXTENSIONS = {
+    ".wav",
+    ".mp3",
+    ".m4a",
+    ".aac",
+    ".flac",
+    ".ogg",
+    ".opus",
+    ".webm",
+    ".mp4",
+    ".mov",
+    ".m4v",
+    ".mkv",
+    ".avi",
+}
 
 
 def _safe_unlink(path: str | None) -> None:
@@ -64,6 +91,118 @@ def _safe_unlink(path: str | None) -> None:
 
 def _safe_slug(value: str) -> str:
     return re.sub(r"[^a-zA-Z0-9_.-]", "_", value)
+
+
+def _voice_sample_output_path(name: str) -> Path:
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    token = uuid.uuid4().hex[:8]
+    return VOICE_SAMPLES_DIR / f"{_safe_slug(name.lower())}_{stamp}_{token}.wav"
+
+
+def _voice_sample_draft_to_dict(draft: "VoiceSampleDraft") -> dict:
+    duration = 0.0
+    if os.path.exists(draft.audio_path):
+        with suppress(Exception):
+            duration = get_wav_duration(draft.audio_path)
+    return {
+        "id": draft.id,
+        "audio_path": draft.audio_path,
+        "original_filename": draft.original_filename,
+        "transcription": draft.transcription,
+        "words": draft.words,
+        "duration_seconds": round(duration, 2),
+        "created_at": draft.created_at,
+    }
+
+
+def _is_allowed_voice_clip(file: UploadFile) -> bool:
+    filename = file.filename or ""
+    extension = Path(filename).suffix.lower()
+    if extension and extension in VOICE_SAMPLE_ALLOWED_EXTENSIONS:
+        return True
+
+    content_type = (file.content_type or "").lower()
+    return content_type.startswith("audio/") or content_type.startswith("video/")
+
+
+def _get_voice_sample_draft_or_404(draft_id: str) -> "VoiceSampleDraft":
+    draft = voice_sample_drafts.get(draft_id)
+    if not draft:
+        raise HTTPException(404, "Voice sample draft not found")
+    if not draft.audio_path or not os.path.exists(draft.audio_path):
+        _cleanup_voice_sample_draft(draft_id)
+        raise HTTPException(404, "Voice sample draft audio not found")
+    return draft
+
+
+def _cleanup_voice_sample_draft(draft_id: str) -> None:
+    draft = voice_sample_drafts.pop(draft_id, None)
+    if not draft:
+        return
+    _safe_unlink(draft.audio_path)
+    _safe_unlink(draft.source_path)
+
+
+def _extract_voice_clip_to_wav(source_path: Path, destination_path: Path) -> None:
+    try:
+        clip = load_and_normalize(str(source_path))
+        clip.export(destination_path, format="wav")
+    except Exception as exc:
+        raise HTTPException(400, f"Unsupported audio/video clip: {exc}")
+
+
+async def _create_voice_sample_draft_from_upload(
+    clip: UploadFile,
+    *,
+    transcribe: bool = True,
+) -> "VoiceSampleDraft":
+    if not _is_allowed_voice_clip(clip):
+        raise HTTPException(
+            400,
+            "Unsupported file type. Please upload an audio or video clip.",
+        )
+
+    content = await clip.read()
+    if not content:
+        raise HTTPException(400, "Uploaded clip is empty")
+
+    VOICE_SAMPLE_DRAFTS_DIR.mkdir(parents=True, exist_ok=True)
+
+    draft_id = uuid.uuid4().hex
+    original_filename = clip.filename or "voice_clip"
+    extension = Path(original_filename).suffix.lower() or ".bin"
+    safe_source_name = _safe_slug(f"{draft_id}_src{extension}")
+    source_path = VOICE_SAMPLE_DRAFTS_DIR / safe_source_name
+    audio_path = VOICE_SAMPLE_DRAFTS_DIR / f"{draft_id}.wav"
+
+    source_path.write_bytes(content)
+    try:
+        _extract_voice_clip_to_wav(source_path, audio_path)
+    except Exception:
+        _safe_unlink(str(source_path))
+        _safe_unlink(str(audio_path))
+        raise
+
+    transcription = ""
+    words: list[dict] = []
+    if transcribe:
+        try:
+            transcription, words = await _transcribe_audio_file_or_502(str(audio_path))
+        except Exception:
+            _safe_unlink(str(source_path))
+            _safe_unlink(str(audio_path))
+            raise
+
+    draft = VoiceSampleDraft(
+        id=draft_id,
+        audio_path=str(audio_path),
+        source_path=str(source_path),
+        original_filename=original_filename,
+        transcription=transcription,
+        words=words,
+    )
+    voice_sample_drafts[draft.id] = draft
+    return draft
 
 
 def _project_to_dict(project: Project) -> dict:
@@ -88,6 +227,9 @@ def _segment_to_dict(segment: NarrationSegment) -> dict:
         "audio_path": segment.audio_path,
         "duration_seconds": segment.duration_seconds,
         "error_message": segment.error_message,
+        "quality_score": segment.quality_score,
+        "needs_review": segment.needs_review,
+        "generation_attempts": segment.generation_attempts,
         "selected_variant_id": segment.selected_variant_id,
         "voice_sample_id": segment.voice_sample_id,
         "magpie_voice": segment.magpie_voice,
@@ -211,6 +353,20 @@ def _upsert_transcription(
     return transcription
 
 
+@dataclass
+class VoiceSampleDraft:
+    id: str
+    audio_path: str
+    source_path: str | None
+    original_filename: str
+    transcription: str = ""
+    words: list[dict] = field(default_factory=list)
+    created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+voice_sample_drafts: dict[str, VoiceSampleDraft] = {}
+
+
 # --- Generation queue infrastructure ---
 
 
@@ -222,17 +378,13 @@ class GenerationJob:
     project_id: uuid.UUID | None = None
 
 
-generation_queue: asyncio.Queue[GenerationJob] = asyncio.Queue()
-cancel_event: asyncio.Event = asyncio.Event()
-active_job: dict = {"job": None}
 ws_clients: set[WebSocket] = set()
-gen_times: dict[str, list[float]] = {"dia": [], "magpie": []}
-_worker_task: asyncio.Task | None = None
+_redis_listener_task: asyncio.Task | None = None
 
 
 async def _broadcast(message: dict):
     dead = set()
-    data = json.dumps(message)
+    data = json.dumps(jsonable_encoder(message), default=str)
     for ws in ws_clients:
         try:
             await ws.send_text(data)
@@ -241,26 +393,39 @@ async def _broadcast(message: dict):
     ws_clients.difference_update(dead)
 
 
-def _record_time(service: str, elapsed: float):
-    times = gen_times.setdefault(service, [])
-    times.append(elapsed)
-    if len(times) > 20:
-        gen_times[service] = times[-20:]
-
-
-def _estimate_time(service: str) -> float:
-    times = gen_times.get(service, [])
-    if times:
-        return round(sum(times) / len(times), 1)
-    return 45.0 if service == "dia" else 3.0
-
-
 def _queue_status() -> dict:
-    return {
-        "type": "queue_status",
-        "queue_length": generation_queue.qsize(),
-        "active_job_id": active_job["job"].id if active_job["job"] else None,
-    }
+    return narration_queue_status_payload()
+
+
+async def _redis_event_listener():
+    client = redis_async.from_url(settings.redis_url, decode_responses=True)
+    pubsub = client.pubsub()
+    await pubsub.subscribe(NARRATION_EVENTS_CHANNEL)
+    logger.info("Subscribed to narration event channel: %s", NARRATION_EVENTS_CHANNEL)
+    try:
+        async for message in pubsub.listen():
+            if message.get("type") != "message":
+                continue
+            raw = message.get("data")
+            if not raw:
+                continue
+            try:
+                payload = json.loads(raw)
+            except Exception:
+                logger.warning("Skipping invalid narration event payload")
+                continue
+            await _broadcast(payload)
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        logger.exception("Narration redis listener failed")
+    finally:
+        with suppress(Exception):
+            await pubsub.unsubscribe(NARRATION_EVENTS_CHANNEL)
+        with suppress(Exception):
+            await pubsub.aclose()
+        with suppress(Exception):
+            await client.aclose()
 
 
 async def _seed_default_voice_sample():
@@ -272,8 +437,20 @@ async def _seed_default_voice_sample():
         if count > 0:
             return
 
-        sample_audio = Path(__file__).resolve().parents[1] / "services" / "narration" / "sample" / "Alice.wav"
-        sample_text = Path(__file__).resolve().parents[1] / "services" / "narration" / "sample" / "text.txt"
+        sample_audio = (
+            Path(__file__).resolve().parents[1]
+            / "services"
+            / "narration"
+            / "sample"
+            / "Alice.wav"
+        )
+        sample_text = (
+            Path(__file__).resolve().parents[1]
+            / "services"
+            / "narration"
+            / "sample"
+            / "text.txt"
+        )
         if not sample_audio.exists():
             return
 
@@ -294,22 +471,26 @@ async def _seed_default_voice_sample():
 
 @router.on_event("startup")
 async def _startup_narration():
-    global _worker_task
+    global _redis_listener_task
     NARRATION_ROOT.mkdir(parents=True, exist_ok=True)
     VOICE_SAMPLES_DIR.mkdir(parents=True, exist_ok=True)
+    if VOICE_SAMPLE_DRAFTS_DIR.exists():
+        shutil.rmtree(VOICE_SAMPLE_DRAFTS_DIR, ignore_errors=True)
+    VOICE_SAMPLE_DRAFTS_DIR.mkdir(parents=True, exist_ok=True)
+    voice_sample_drafts.clear()
     await _seed_default_voice_sample()
-    if _worker_task is None or _worker_task.done():
-        _worker_task = asyncio.create_task(_generation_worker())
+    if _redis_listener_task is None or _redis_listener_task.done():
+        _redis_listener_task = asyncio.create_task(_redis_event_listener())
 
 
 @router.on_event("shutdown")
 async def _shutdown_narration():
-    global _worker_task
-    if _worker_task:
-        _worker_task.cancel()
+    global _redis_listener_task
+    if _redis_listener_task:
+        _redis_listener_task.cancel()
         with suppress(asyncio.CancelledError):
-            await _worker_task
-    _worker_task = None
+            await _redis_listener_task
+    _redis_listener_task = None
 
 
 # --- Pydantic models ---
@@ -375,6 +556,20 @@ class RegenerateRequest(BaseModel):
 class TrimRequest(BaseModel):
     start_ms: int
     end_ms: int
+
+
+class VoiceSampleDraftTrimRequest(BaseModel):
+    start_ms: int
+    end_ms: int
+
+
+class VoiceSampleDraftFinalizeRequest(BaseModel):
+    name: str
+    transcript: str = ""
+
+
+class VoiceSampleUpdateRequest(BaseModel):
+    transcript: str
 
 
 class ProcessChunkRequest(BaseModel):
@@ -504,7 +699,9 @@ async def api_update_segment(
     body: SegmentUpdate,
     db: Session = Depends(get_db),
 ):
-    segment = db.query(NarrationSegment).filter(NarrationSegment.id == segment_id).first()
+    segment = (
+        db.query(NarrationSegment).filter(NarrationSegment.id == segment_id).first()
+    )
     if not segment:
         raise HTTPException(404, "Segment not found")
 
@@ -515,13 +712,21 @@ async def api_update_segment(
         segment.audio_path = None
         segment.duration_seconds = None
         segment.error_message = None
+        segment.quality_score = None
+        segment.needs_review = False
+        segment.generation_attempts = 0
         segment.selected_variant_id = None
+        db.query(NarrationTranscription).filter(
+            NarrationTranscription.segment_id == segment.id
+        ).delete(synchronize_session=False)
     if body.position is not None:
         segment.position = body.position
     if body.service is not None:
         segment.service = body.service
     if body.voice_sample_id is not None:
-        segment.voice_sample_id = body.voice_sample_id if body.voice_sample_id > 0 else None
+        segment.voice_sample_id = (
+            body.voice_sample_id if body.voice_sample_id > 0 else None
+        )
     if body.magpie_voice is not None:
         segment.magpie_voice = body.magpie_voice if body.magpie_voice else None
 
@@ -532,7 +737,9 @@ async def api_update_segment(
 
 @router.delete("/api/segments/{segment_id}")
 async def api_delete_segment(segment_id: int, db: Session = Depends(get_db)):
-    segment = db.query(NarrationSegment).filter(NarrationSegment.id == segment_id).first()
+    segment = (
+        db.query(NarrationSegment).filter(NarrationSegment.id == segment_id).first()
+    )
     if not segment:
         raise HTTPException(404, "Segment not found")
 
@@ -694,6 +901,9 @@ async def api_sync_segments(
             segment.duration_seconds = None
             segment.selected_variant_id = None
             segment.error_message = None
+            segment.quality_score = None
+            segment.needs_review = False
+            segment.generation_attempts = 0
             changed += 1
             continue
 
@@ -724,7 +934,9 @@ async def api_sync_segments(
         _safe_unlink(path)
 
     return {
-        "segments": [_segment_to_dict(segment) for segment in _list_segments(project_id, db)],
+        "segments": [
+            _segment_to_dict(segment) for segment in _list_segments(project_id, db)
+        ],
         "changed": changed,
         "added": added,
         "removed": removed,
@@ -738,16 +950,20 @@ async def api_delete_all_segments(project_id: uuid.UUID, db: Session = Depends(g
     for path in _collect_project_audio_paths(project_id, db):
         _safe_unlink(path)
 
-    deleted = db.query(NarrationSegment).filter(
-        NarrationSegment.project_id == project_id
-    ).delete(synchronize_session=False)
+    deleted = (
+        db.query(NarrationSegment)
+        .filter(NarrationSegment.project_id == project_id)
+        .delete(synchronize_session=False)
+    )
     db.commit()
     return {"ok": True, "deleted": deleted}
 
 
 @router.get("/api/segments/{segment_id}/audio")
 async def api_get_audio(segment_id: int, db: Session = Depends(get_db)):
-    segment = db.query(NarrationSegment).filter(NarrationSegment.id == segment_id).first()
+    segment = (
+        db.query(NarrationSegment).filter(NarrationSegment.id == segment_id).first()
+    )
     if not segment:
         raise HTTPException(404, "Segment not found")
     if not segment.audio_path or not os.path.exists(segment.audio_path):
@@ -777,23 +993,70 @@ async def api_list_voice_samples(db: Session = Depends(get_db)):
     return [_voice_sample_to_dict(sample) for sample in samples]
 
 
-@router.post("/api/voice-samples", status_code=201)
-async def api_create_voice_sample(
-    name: str = Form(...),
-    transcript: str = Form(""),
-    audio: UploadFile = File(...),
+@router.post("/api/voice-samples/drafts", status_code=201)
+async def api_create_voice_sample_draft(clip: UploadFile = File(...)):
+    draft = await _create_voice_sample_draft_from_upload(clip, transcribe=True)
+    return _voice_sample_draft_to_dict(draft)
+
+
+@router.get("/api/voice-samples/drafts/{draft_id}")
+async def api_get_voice_sample_draft(draft_id: str):
+    draft = _get_voice_sample_draft_or_404(draft_id)
+    return _voice_sample_draft_to_dict(draft)
+
+
+@router.get("/api/voice-samples/drafts/{draft_id}/audio")
+async def api_get_voice_sample_draft_audio(draft_id: str):
+    draft = _get_voice_sample_draft_or_404(draft_id)
+    return FileResponse(draft.audio_path, media_type="audio/wav")
+
+
+@router.post("/api/voice-samples/drafts/{draft_id}/transcribe")
+async def api_transcribe_voice_sample_draft(draft_id: str):
+    draft = _get_voice_sample_draft_or_404(draft_id)
+    text, words = await _transcribe_audio_file_or_502(draft.audio_path)
+    draft.transcription = text
+    draft.words = words
+    return _voice_sample_draft_to_dict(draft)
+
+
+@router.post("/api/voice-samples/drafts/{draft_id}/trim")
+async def api_trim_voice_sample_draft(draft_id: str, body: VoiceSampleDraftTrimRequest):
+    draft = _get_voice_sample_draft_or_404(draft_id)
+
+    duration_ms = max(1, int(round(get_wav_duration(draft.audio_path) * 1000)))
+    start_ms = max(0, body.start_ms)
+    end_ms = min(duration_ms, body.end_ms)
+
+    if end_ms <= start_ms:
+        raise HTTPException(400, "Trim end must be greater than trim start")
+    if end_ms - start_ms < 50:
+        raise HTTPException(400, "Trim range must be at least 50ms")
+
+    trim_audio(draft.audio_path, start_ms, end_ms)
+    text, words = await _transcribe_audio_file_or_502(draft.audio_path)
+    draft.transcription = text
+    draft.words = words
+    return _voice_sample_draft_to_dict(draft)
+
+
+@router.post("/api/voice-samples/drafts/{draft_id}/finalize", status_code=201)
+async def api_finalize_voice_sample_draft(
+    draft_id: str,
+    body: VoiceSampleDraftFinalizeRequest,
     db: Session = Depends(get_db),
 ):
-    filename = audio.filename or "sample.wav"
-    if not filename.lower().endswith(".wav"):
-        raise HTTPException(400, "Only WAV files are supported")
+    draft = _get_voice_sample_draft_or_404(draft_id)
+
+    name = body.name.strip()
+    if not name:
+        raise HTTPException(400, "Voice sample name is required")
+
+    transcript = body.transcript.strip() or draft.transcription
+    destination = _voice_sample_output_path(name)
 
     VOICE_SAMPLES_DIR.mkdir(parents=True, exist_ok=True)
-    safe_name = _safe_slug(filename)
-    destination = VOICE_SAMPLES_DIR / f"{_safe_slug(name.lower())}_{safe_name}"
-
-    content = await audio.read()
-    destination.write_bytes(content)
+    shutil.copy2(draft.audio_path, destination)
 
     sample = NarrationVoiceSample(
         name=name,
@@ -803,20 +1066,93 @@ async def api_create_voice_sample(
     db.add(sample)
     db.commit()
     db.refresh(sample)
+
+    _cleanup_voice_sample_draft(draft_id)
     return _voice_sample_to_dict(sample)
+
+
+@router.delete("/api/voice-samples/drafts/{draft_id}")
+async def api_delete_voice_sample_draft(draft_id: str):
+    draft = voice_sample_drafts.get(draft_id)
+    if not draft:
+        raise HTTPException(404, "Voice sample draft not found")
+    _cleanup_voice_sample_draft(draft_id)
+    return {"ok": True}
+
+
+@router.post("/api/voice-samples", status_code=201)
+async def api_create_voice_sample(
+    name: str = Form(...),
+    transcript: str = Form(""),
+    audio: UploadFile = File(...),
+    db: Session = Depends(get_db),
+):
+    clean_name = name.strip()
+    if not clean_name:
+        raise HTTPException(400, "Voice sample name is required")
+
+    requested_transcript = transcript.strip()
+    draft = await _create_voice_sample_draft_from_upload(
+        audio,
+        transcribe=not requested_transcript,
+    )
+    try:
+        VOICE_SAMPLES_DIR.mkdir(parents=True, exist_ok=True)
+        destination = _voice_sample_output_path(clean_name)
+        shutil.copy2(draft.audio_path, destination)
+
+        sample = NarrationVoiceSample(
+            name=clean_name,
+            audio_path=str(destination),
+            transcript=requested_transcript or draft.transcription,
+        )
+        db.add(sample)
+        db.commit()
+        db.refresh(sample)
+        return _voice_sample_to_dict(sample)
+    finally:
+        _cleanup_voice_sample_draft(draft.id)
 
 
 @router.get("/api/voice-samples/{sample_id}")
 async def api_get_voice_sample(sample_id: int, db: Session = Depends(get_db)):
-    sample = db.query(NarrationVoiceSample).filter(NarrationVoiceSample.id == sample_id).first()
+    sample = (
+        db.query(NarrationVoiceSample)
+        .filter(NarrationVoiceSample.id == sample_id)
+        .first()
+    )
     if not sample:
         raise HTTPException(404, "Voice sample not found")
     return _voice_sample_to_dict(sample)
 
 
+@router.patch("/api/voice-samples/{sample_id}")
+async def api_update_voice_sample(
+    sample_id: int,
+    body: VoiceSampleUpdateRequest,
+    db: Session = Depends(get_db),
+):
+    sample = (
+        db.query(NarrationVoiceSample)
+        .filter(NarrationVoiceSample.id == sample_id)
+        .first()
+    )
+    if not sample:
+        raise HTTPException(404, "Voice sample not found")
+
+    sample.transcript = body.transcript.strip()
+    db.commit()
+    db.refresh(sample)
+    return _voice_sample_to_dict(sample)
+
+
 @router.get("/api/voice-samples/{sample_id}/audio")
 async def api_get_voice_sample_audio(sample_id: int, db: Session = Depends(get_db)):
-    sample = db.query(NarrationVoiceSample).filter(NarrationVoiceSample.id == sample_id).first()
+    sample = (
+        db.query(NarrationVoiceSample)
+        .filter(NarrationVoiceSample.id == sample_id)
+        .first()
+    )
     if not sample:
         raise HTTPException(404, "Voice sample not found")
     if not sample.audio_path or not os.path.exists(sample.audio_path):
@@ -826,7 +1162,11 @@ async def api_get_voice_sample_audio(sample_id: int, db: Session = Depends(get_d
 
 @router.delete("/api/voice-samples/{sample_id}")
 async def api_delete_voice_sample(sample_id: int, db: Session = Depends(get_db)):
-    sample = db.query(NarrationVoiceSample).filter(NarrationVoiceSample.id == sample_id).first()
+    sample = (
+        db.query(NarrationVoiceSample)
+        .filter(NarrationVoiceSample.id == sample_id)
+        .first()
+    )
     if not sample:
         raise HTTPException(404, "Voice sample not found")
 
@@ -840,37 +1180,12 @@ async def api_delete_voice_sample(sample_id: int, db: Session = Depends(get_db))
 
 
 async def _transcribe_audio_file(audio_path: str) -> tuple[str, list[dict]]:
-    with open(audio_path, "rb") as source:
-        audio_bytes = source.read()
-
-    timeout = httpx.Timeout(connect=10, read=120, write=10, pool=10)
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        response = await client.post(
-            f"{STT_URL}/transcribe",
-            params={"timestamps": "true"},
-            files={"file": ("audio.wav", audio_bytes, "audio/wav")},
-        )
-
-    if response.status_code != 200:
-        raise RuntimeError(
-            f"STT service returned {response.status_code}: {response.text[:300]}"
-        )
-
-    payload = response.json()
-    return payload.get("text", ""), payload.get("words", [])
+    return await transcribe_audio_file(audio_path)
 
 
-@router.post("/api/segments/{segment_id}/transcribe")
-async def api_transcribe_segment(segment_id: int, db: Session = Depends(get_db)):
-    segment = db.query(NarrationSegment).filter(NarrationSegment.id == segment_id).first()
-    if not segment:
-        raise HTTPException(404, "Segment not found")
-    if not segment.audio_path or not os.path.exists(segment.audio_path):
-        raise HTTPException(400, "Segment has no audio to transcribe")
-
+async def _transcribe_audio_file_or_502(audio_path: str) -> tuple[str, list[dict]]:
     try:
-        text, words = await _transcribe_audio_file(segment.audio_path)
-        transcription = _upsert_transcription(db, segment_id, text, words)
+        return await _transcribe_audio_file(audio_path)
     except httpx.ConnectError:
         raise HTTPException(
             502,
@@ -879,12 +1194,28 @@ async def api_transcribe_segment(segment_id: int, db: Session = Depends(get_db))
     except Exception as exc:
         raise HTTPException(502, f"Transcription failed: {exc}")
 
+
+@router.post("/api/segments/{segment_id}/transcribe")
+async def api_transcribe_segment(segment_id: int, db: Session = Depends(get_db)):
+    segment = (
+        db.query(NarrationSegment).filter(NarrationSegment.id == segment_id).first()
+    )
+    if not segment:
+        raise HTTPException(404, "Segment not found")
+    if not segment.audio_path or not os.path.exists(segment.audio_path):
+        raise HTTPException(400, "Segment has no audio to transcribe")
+
+    text, words = await _transcribe_audio_file_or_502(segment.audio_path)
+    transcription = _upsert_transcription(db, segment_id, text, words)
+
     return _transcription_to_dict(transcription)
 
 
 @router.get("/api/segments/{segment_id}/transcription")
 async def api_get_transcription(segment_id: int, db: Session = Depends(get_db)):
-    segment = db.query(NarrationSegment).filter(NarrationSegment.id == segment_id).first()
+    segment = (
+        db.query(NarrationSegment).filter(NarrationSegment.id == segment_id).first()
+    )
     if not segment:
         raise HTTPException(404, "Segment not found")
 
@@ -900,9 +1231,11 @@ async def api_get_transcription(segment_id: int, db: Session = Depends(get_db)):
 
 @router.delete("/api/segments/{segment_id}/transcription")
 async def api_delete_transcription(segment_id: int, db: Session = Depends(get_db)):
-    deleted = db.query(NarrationTranscription).filter(
-        NarrationTranscription.segment_id == segment_id
-    ).delete(synchronize_session=False)
+    deleted = (
+        db.query(NarrationTranscription)
+        .filter(NarrationTranscription.segment_id == segment_id)
+        .delete(synchronize_session=False)
+    )
     db.commit()
     if not deleted:
         raise HTTPException(404, "No transcription to delete")
@@ -915,14 +1248,34 @@ async def api_trim_segment(
     body: TrimRequest,
     db: Session = Depends(get_db),
 ):
-    segment = db.query(NarrationSegment).filter(NarrationSegment.id == segment_id).first()
+    segment = (
+        db.query(NarrationSegment).filter(NarrationSegment.id == segment_id).first()
+    )
     if not segment:
         raise HTTPException(404, "Segment not found")
     if not segment.audio_path or not os.path.exists(segment.audio_path):
         raise HTTPException(400, "Segment has no audio to trim")
 
-    new_duration = trim_audio(segment.audio_path, body.start_ms, body.end_ms)
-    segment.duration_seconds = round(new_duration, 2)
+    duration_ms = max(1, int(round(get_wav_duration(segment.audio_path) * 1000)))
+    start_ms = max(0, body.start_ms)
+    end_ms = min(duration_ms, body.end_ms)
+
+    if end_ms <= start_ms:
+        raise HTTPException(400, "Trim end must be greater than trim start")
+    if end_ms - start_ms < 50:
+        raise HTTPException(400, "Trim range must be at least 50ms")
+
+    new_duration = trim_audio(segment.audio_path, start_ms, end_ms)
+    rounded_duration = round(new_duration, 2)
+    segment.duration_seconds = rounded_duration
+
+    db.query(NarrationVariant).filter(
+        NarrationVariant.segment_id == segment_id,
+        NarrationVariant.audio_path == segment.audio_path,
+    ).update(
+        {NarrationVariant.duration_seconds: rounded_duration},
+        synchronize_session=False,
+    )
 
     db.query(NarrationTranscription).filter(
         NarrationTranscription.segment_id == segment_id
@@ -957,7 +1310,9 @@ async def api_get_project_transcriptions(
 
     transcriptions = (
         db.query(NarrationTranscription)
-        .join(NarrationSegment, NarrationTranscription.segment_id == NarrationSegment.id)
+        .join(
+            NarrationSegment, NarrationTranscription.segment_id == NarrationSegment.id
+        )
         .filter(NarrationSegment.project_id == project_id)
         .all()
     )
@@ -975,7 +1330,9 @@ async def api_transcribe_all(project_id: uuid.UUID, db: Session = Depends(get_db
     existing = {
         segment_id
         for (segment_id,) in db.query(NarrationTranscription.segment_id)
-        .join(NarrationSegment, NarrationTranscription.segment_id == NarrationSegment.id)
+        .join(
+            NarrationSegment, NarrationTranscription.segment_id == NarrationSegment.id
+        )
         .filter(NarrationSegment.project_id == project_id)
         .all()
     }
@@ -1008,212 +1365,60 @@ async def api_transcribe_all(project_id: uuid.UUID, db: Session = Depends(get_db
 # --- Generation ---
 
 
-def _make_output_filename(position: int, text: str, variant_num: int = 0) -> str:
-    clean = re.sub(r"\[S\d+\]\s*", "", text)
-    words = clean.split()[:5]
-    name = "_".join(words)
-    name = re.sub(r"[^\w\s-]", "", name)
-    name = re.sub(r"\s+", "_", name).lower()[:50]
-    suffix = f"_v{variant_num}" if variant_num > 0 else ""
-    return f"{position:03d}_{name}{suffix}.wav"
+def _enqueue_generation_job(
+    *,
+    segment_ids: list[int],
+    text_overrides: dict[int, str] | None = None,
+    project_id: uuid.UUID | None = None,
+) -> GenerationJob:
+    job = GenerationJob(
+        segment_ids=segment_ids,
+        text_overrides=text_overrides or {},
+        project_id=project_id,
+    )
+    init_narration_job(job.id, total=len(segment_ids))
+    increment_narration_queue_depth(len(segment_ids))
 
-
-async def _generation_worker():
-    while True:
-        job = await generation_queue.get()
-        active_job["job"] = job
-        cancel_event.clear()
-        generated = 0
-        failed = 0
-        errors: list[dict] = []
-        total = len(job.segment_ids)
-
-        await _broadcast(
-            {
-                "type": "queued",
-                "job_id": job.id,
-                "segment_ids": job.segment_ids,
-                "position": 0,
-            }
-        )
-        await _broadcast(_queue_status())
-
-        for index, segment_id in enumerate(job.segment_ids):
-            if cancel_event.is_set():
-                await _broadcast(
-                    {
-                        "type": "job_cancelled",
-                        "job_id": job.id,
-                        "completed": index,
-                        "remaining": total - index,
-                    }
-                )
-                break
-
-            with SessionLocal() as db:
-                segment = (
-                    db.query(NarrationSegment)
-                    .filter(NarrationSegment.id == segment_id)
-                    .first()
-                )
-                service = segment.service if segment else "dia"
-
-            estimate = _estimate_time(service)
-            await _broadcast(
-                {
-                    "type": "segment_start",
-                    "job_id": job.id,
-                    "segment_id": segment_id,
-                    "index": index,
-                    "total": total,
-                    "estimate_seconds": estimate,
-                }
-            )
-
-            start = time.monotonic()
-            try:
-                text_override = job.text_overrides.get(segment_id)
-                await _generate_segment(segment_id, text_override=text_override)
-                elapsed = round(time.monotonic() - start, 1)
-                _record_time(service, elapsed)
-                generated += 1
-
-                with SessionLocal() as db:
-                    segment = (
-                        db.query(NarrationSegment)
-                        .filter(NarrationSegment.id == segment_id)
-                        .first()
-                    )
-                    payload = _segment_to_dict(segment) if segment else None
-
-                await _broadcast(
-                    {
-                        "type": "segment_done",
-                        "job_id": job.id,
-                        "segment_id": segment_id,
-                        "segment": payload,
-                        "index": index,
-                        "total": total,
-                        "generation_seconds": elapsed,
-                    }
-                )
-            except Exception as exc:
-                failed += 1
-                errors.append({"id": segment_id, "error": str(exc)})
-                await _broadcast(
-                    {
-                        "type": "segment_error",
-                        "job_id": job.id,
-                        "segment_id": segment_id,
-                        "error": str(exc),
-                        "index": index,
-                        "total": total,
-                    }
-                )
-
-        if not cancel_event.is_set():
-            await _broadcast(
-                {
-                    "type": "job_done",
-                    "job_id": job.id,
-                    "generated": generated,
-                    "failed": failed,
-                    "errors": errors,
-                }
-            )
-
-        active_job["job"] = None
-        generation_queue.task_done()
-        await _broadcast(_queue_status())
-
-
-async def _generate_segment(segment_id: int, text_override: str | None = None):
-    with SessionLocal() as db:
-        segment = db.query(NarrationSegment).filter(NarrationSegment.id == segment_id).first()
-        if not segment:
-            raise RuntimeError(f"Segment {segment_id} not found")
-
-        segment.status = "generating"
-        segment.error_message = None
-        db.commit()
-
+    for index, segment_id in enumerate(segment_ids):
+        text_override = job.text_overrides.get(segment_id)
+        kwargs = {
+            "segment_id": segment_id,
+            "job_id": job.id,
+            "index": index,
+            "total": len(segment_ids),
+        }
         if text_override:
-            gen_text = sanitize_text(text_override)
-            raw_text = text_override
-        else:
-            gen_text = segment.sanitized_text
-            raw_text = segment.text
+            kwargs["text_override"] = text_override
+        generate_narration_segment_task.apply_async(kwargs=kwargs, queue="dia")
 
-        existing_variants = (
-            db.query(func.count(NarrationVariant.id))
-            .filter(NarrationVariant.segment_id == segment_id)
-            .scalar()
-            or 0
-        )
+    return job
 
-        output_dir = _project_output_dir(segment.project_id)
-        output_dir.mkdir(parents=True, exist_ok=True)
-        filename = _make_output_filename(segment.position, raw_text, existing_variants)
-        output_path = output_dir / filename
 
-        try:
-            if segment.service == "dia":
-                dia_kwargs = {}
-                if segment.voice_sample_id:
-                    voice_sample = (
-                        db.query(NarrationVoiceSample)
-                        .filter(NarrationVoiceSample.id == segment.voice_sample_id)
-                        .first()
-                    )
-                    if voice_sample:
-                        dia_kwargs["reference_audio_path"] = voice_sample.audio_path
-                        if voice_sample.transcript:
-                            dia_kwargs["reference_text_override"] = voice_sample.transcript
-
-                await dia_generate(gen_text, str(output_path), **dia_kwargs)
-            elif segment.service == "magpie":
-                await magpie_generate(
-                    gen_text,
-                    str(output_path),
-                    voice=segment.magpie_voice or None,
-                )
-            else:
-                raise RuntimeError(f"Unknown service: {segment.service}")
-
-            duration = get_wav_duration(str(output_path))
-
-            variant = NarrationVariant(
-                segment_id=segment.id,
-                text=raw_text,
-                sanitized_text=gen_text,
-                service=segment.service,
-                audio_path=str(output_path),
-                duration_seconds=round(duration, 2),
-            )
-            db.add(variant)
-            db.flush()
-
-            segment.status = "done"
-            segment.audio_path = str(output_path)
-            segment.duration_seconds = round(duration, 2)
-            segment.error_message = None
-            segment.selected_variant_id = variant.id
-            db.commit()
-        except Exception as exc:
-            segment.status = "error"
-            segment.error_message = str(exc)
-            db.commit()
-            raise
+async def _broadcast_job_queued(job: GenerationJob):
+    await _broadcast(
+        {
+            "type": "queued",
+            "job_id": job.id,
+            "segment_ids": job.segment_ids,
+            "position": 0,
+        }
+    )
+    await _broadcast(_queue_status())
 
 
 @router.post("/api/segments/{segment_id}/generate", status_code=202)
 async def api_generate_segment(segment_id: int, db: Session = Depends(get_db)):
-    segment = db.query(NarrationSegment).filter(NarrationSegment.id == segment_id).first()
+    segment = (
+        db.query(NarrationSegment).filter(NarrationSegment.id == segment_id).first()
+    )
     if not segment:
         raise HTTPException(404, "Segment not found")
 
-    job = GenerationJob(segment_ids=[segment_id], project_id=segment.project_id)
-    await generation_queue.put(job)
+    job = _enqueue_generation_job(
+        segment_ids=[segment_id],
+        project_id=segment.project_id,
+    )
+    await _broadcast_job_queued(job)
     return {"job_id": job.id, "queued": 1}
 
 
@@ -1225,8 +1430,11 @@ async def api_generate_all(project_id: uuid.UUID, db: Session = Depends(get_db))
     if not pending:
         return {"message": "All segments already generated", "queued": 0}
 
-    job = GenerationJob(segment_ids=[segment.id for segment in pending], project_id=project_id)
-    await generation_queue.put(job)
+    job = _enqueue_generation_job(
+        segment_ids=[segment.id for segment in pending],
+        project_id=project_id,
+    )
+    await _broadcast_job_queued(job)
     return {"job_id": job.id, "queued": len(pending)}
 
 
@@ -1238,26 +1446,42 @@ async def api_generate_failed(project_id: uuid.UUID, db: Session = Depends(get_d
     if not failed_segments:
         return {"message": "No failed segments", "queued": 0}
 
-    job = GenerationJob(
+    job = _enqueue_generation_job(
         segment_ids=[segment.id for segment in failed_segments],
         project_id=project_id,
     )
-    await generation_queue.put(job)
+    await _broadcast_job_queued(job)
     return {"job_id": job.id, "queued": len(failed_segments)}
 
 
 @router.post("/api/generation/cancel")
 async def api_cancel_generation():
-    cancel_event.set()
-    return {"ok": True}
+    active_job_id = get_narration_active_job()
+    if not active_job_id:
+        return {"ok": False, "message": "No active generation job"}
+
+    mark_narration_job_cancelled(active_job_id)
+    await _broadcast(
+        {
+            "type": "job_cancelled",
+            "job_id": active_job_id,
+            "completed": 0,
+            "remaining": 0,
+        }
+    )
+    await _broadcast(_queue_status())
+    return {"ok": True, "job_id": active_job_id}
 
 
 @router.get("/api/status")
 async def api_status():
+    queue_status = _queue_status()
+    queue_length = queue_status.get("queue_length", 0)
+    active_job_id = queue_status.get("active_job_id")
     return {
-        "active": active_job["job"] is not None,
-        "active_job_id": active_job["job"].id if active_job["job"] else None,
-        "queue_length": generation_queue.qsize(),
+        "active": active_job_id is not None or queue_length > 0,
+        "active_job_id": active_job_id,
+        "queue_length": queue_length,
     }
 
 
@@ -1276,7 +1500,9 @@ async def api_export(
     done_segments = [
         segment
         for segment in segments
-        if segment.status == "done" and segment.audio_path and os.path.exists(segment.audio_path)
+        if segment.status == "done"
+        and segment.audio_path
+        and os.path.exists(segment.audio_path)
     ]
     if not done_segments:
         raise HTTPException(400, "No audio segments to export")
@@ -1310,24 +1536,28 @@ async def api_regenerate_segment(
     body: RegenerateRequest | None = None,
     db: Session = Depends(get_db),
 ):
-    segment = db.query(NarrationSegment).filter(NarrationSegment.id == segment_id).first()
+    segment = (
+        db.query(NarrationSegment).filter(NarrationSegment.id == segment_id).first()
+    )
     if not segment:
         raise HTTPException(404, "Segment not found")
 
     text_override = body.text if body else None
     overrides = {segment_id: text_override} if text_override else {}
-    job = GenerationJob(
+    job = _enqueue_generation_job(
         segment_ids=[segment_id],
         text_overrides=overrides,
         project_id=segment.project_id,
     )
-    await generation_queue.put(job)
+    await _broadcast_job_queued(job)
     return {"job_id": job.id, "queued": 1}
 
 
 @router.get("/api/segments/{segment_id}/variants")
 async def api_list_variants(segment_id: int, db: Session = Depends(get_db)):
-    segment = db.query(NarrationSegment).filter(NarrationSegment.id == segment_id).first()
+    segment = (
+        db.query(NarrationSegment).filter(NarrationSegment.id == segment_id).first()
+    )
     if not segment:
         raise HTTPException(404, "Segment not found")
 
@@ -1341,11 +1571,15 @@ async def api_select_variant(
     variant_id: int,
     db: Session = Depends(get_db),
 ):
-    segment = db.query(NarrationSegment).filter(NarrationSegment.id == segment_id).first()
+    segment = (
+        db.query(NarrationSegment).filter(NarrationSegment.id == segment_id).first()
+    )
     if not segment:
         raise HTTPException(404, "Segment not found")
 
-    variant = db.query(NarrationVariant).filter(NarrationVariant.id == variant_id).first()
+    variant = (
+        db.query(NarrationVariant).filter(NarrationVariant.id == variant_id).first()
+    )
     if not variant or variant.segment_id != segment_id:
         raise HTTPException(404, "Variant not found for this segment")
 
@@ -1353,6 +1587,11 @@ async def api_select_variant(
     segment.audio_path = variant.audio_path
     segment.duration_seconds = variant.duration_seconds
     segment.selected_variant_id = variant_id
+    segment.error_message = None
+    segment.needs_review = False
+    db.query(NarrationTranscription).filter(
+        NarrationTranscription.segment_id == segment_id
+    ).delete(synchronize_session=False)
     db.commit()
     db.refresh(segment)
     return _segment_to_dict(segment)
@@ -1360,7 +1599,9 @@ async def api_select_variant(
 
 @router.get("/api/variants/{variant_id}/audio")
 async def api_get_variant_audio(variant_id: int, db: Session = Depends(get_db)):
-    variant = db.query(NarrationVariant).filter(NarrationVariant.id == variant_id).first()
+    variant = (
+        db.query(NarrationVariant).filter(NarrationVariant.id == variant_id).first()
+    )
     if not variant:
         raise HTTPException(404, "Variant not found")
     if not variant.audio_path or not os.path.exists(variant.audio_path):
@@ -1370,7 +1611,9 @@ async def api_get_variant_audio(variant_id: int, db: Session = Depends(get_db)):
 
 @router.delete("/api/variants/{variant_id}")
 async def api_delete_variant(variant_id: int, db: Session = Depends(get_db)):
-    variant = db.query(NarrationVariant).filter(NarrationVariant.id == variant_id).first()
+    variant = (
+        db.query(NarrationVariant).filter(NarrationVariant.id == variant_id).first()
+    )
     if not variant:
         raise HTTPException(404, "Variant not found")
 
@@ -1392,11 +1635,20 @@ async def api_delete_variant(variant_id: int, db: Session = Depends(get_db)):
             segment.duration_seconds = best.duration_seconds
             segment.selected_variant_id = best.id
             segment.status = "done"
+            segment.error_message = None
+            segment.needs_review = False
         else:
             segment.status = "pending"
             segment.audio_path = None
             segment.duration_seconds = None
             segment.selected_variant_id = None
+            segment.error_message = None
+            segment.quality_score = None
+            segment.needs_review = False
+            segment.generation_attempts = 0
+        db.query(NarrationTranscription).filter(
+            NarrationTranscription.segment_id == segment.id
+        ).delete(synchronize_session=False)
 
     _safe_unlink(variant.audio_path)
     db.delete(variant)
@@ -1420,7 +1672,9 @@ async def websocket_endpoint(ws: WebSocket):
             except json.JSONDecodeError:
                 continue
             if message.get("type") == "cancel":
-                cancel_event.set()
+                active_job_id = get_narration_active_job()
+                if active_job_id and not is_narration_job_cancelled(active_job_id):
+                    mark_narration_job_cancelled(active_job_id)
     except WebSocketDisconnect:
         pass
     finally:

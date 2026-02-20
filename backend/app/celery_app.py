@@ -14,6 +14,9 @@ celery.conf.update(
     result_serializer="json",
     timezone="UTC",
     enable_utc=True,
+    task_routes={
+        "app.tasks.narration.generate_narration_segment_task": {"queue": "dia"},
+    },
 )
 
 celery.autodiscover_tasks(["app.tasks"])

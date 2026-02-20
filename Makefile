@@ -21,6 +21,9 @@ logs-api:
 logs-worker:
 	docker compose logs -f celery-worker
 
+logs-dia-worker:
+	docker compose logs -f celery-dia-worker
+
 logs-migrate:
 	docker compose logs migrate
 

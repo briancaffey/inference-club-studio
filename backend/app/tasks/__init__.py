@@ -10,4 +10,5 @@ from app.tasks.cuts import (  # noqa: F401
 )
 from app.tasks.example import add  # noqa: F401
 from app.tasks.generations import generate_style_transfer  # noqa: F401
+from app.tasks.narration import generate_narration_segment_task  # noqa: F401
 from app.tasks.takes import generate_video_take  # noqa: F401

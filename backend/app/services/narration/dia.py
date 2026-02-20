@@ -3,6 +3,7 @@
 import json
 import logging
 import os
+import re
 import wave
 from pathlib import Path
 
@@ -23,6 +24,7 @@ TOP_P = 0.95
 CFG_FILTER_TOP_K = 30
 SPEED_FACTOR = 0.94
 SEED = -1
+_SPEAKER_HEADER_RE = re.compile(r"^\s*\[(s\d+)\]\s*", re.IGNORECASE)
 
 
 def _load_reference_text() -> str:
@@ -30,6 +32,23 @@ def _load_reference_text() -> str:
         return ""
     with open(REFERENCE_TEXT_FILE, "r") as f:
         return f.read().strip()
+
+
+def _ensure_s1_header(text: str | None) -> str:
+    """Ensure Dia reference text starts with a single [S1] header."""
+    normalized = (text or "").strip()
+    if not normalized:
+        return "[S1]"
+
+    match = _SPEAKER_HEADER_RE.match(normalized)
+    if not match:
+        return f"[S1] {normalized}"
+
+    if match.group(1).lower() == "s1":
+        return normalized
+
+    remainder = normalized[match.end() :].lstrip()
+    return f"[S1] {remainder}" if remainder else "[S1]"
 
 
 def get_wav_duration(filepath: str) -> float:
@@ -40,14 +59,21 @@ def get_wav_duration(filepath: str) -> float:
         return frames / float(rate)
 
 
-async def generate(text: str, output_path: str, reference_audio_path: str | None = None, reference_text_override: str | None = None) -> str:
+async def generate(
+    text: str,
+    output_path: str,
+    reference_audio_path: str | None = None,
+    reference_text_override: str | None = None,
+) -> str:
     """Generate audio from text using Dia voice cloning.
 
     Args:
         text: Sanitized text to generate (should NOT include [S1] tags).
         output_path: Full path to save the WAV file.
-        reference_audio_path: Path to reference WAV for voice cloning. Defaults to REFERENCE_AUDIO.
-        reference_text_override: Reference transcript text. Defaults to loading from REFERENCE_TEXT_FILE.
+        reference_audio_path: Path to reference WAV for voice cloning.
+            Defaults to REFERENCE_AUDIO.
+        reference_text_override: Reference transcript text.
+            Defaults to loading from REFERENCE_TEXT_FILE.
 
     Returns:
         Path to the generated WAV file.
@@ -57,7 +83,12 @@ async def generate(text: str, output_path: str, reference_audio_path: str | None
     """
     base_url = DIA_URL.rstrip("/")
     ref_audio = reference_audio_path or REFERENCE_AUDIO
-    reference_text = reference_text_override if reference_text_override is not None else _load_reference_text()
+    reference_text = (
+        reference_text_override
+        if reference_text_override is not None
+        else _load_reference_text()
+    )
+    reference_text = _ensure_s1_header(reference_text)
 
     # Dia expects: reference text with [S1], then new text, then [S2] to signal end
     text_to_generate = f"[S1] {text}\n[S2]"
@@ -108,7 +139,9 @@ async def generate(text: str, output_path: str, reference_audio_path: str | None
         )
 
         if resp.status_code != 200:
-            raise RuntimeError(f"Generation request failed: {resp.status_code} {resp.text}")
+            raise RuntimeError(
+                f"Generation request failed: {resp.status_code} {resp.text}"
+            )
 
         response_data = resp.json()
         if "event_id" not in response_data:
@@ -142,7 +175,7 @@ async def generate(text: str, output_path: str, reference_audio_path: str | None
             raise RuntimeError("No audio URL found in SSE response")
 
         # 4. Download the audio
-        logger.info(f"Downloading audio...")
+        logger.info("Downloading audio...")
         resp = await client.get(audio_url)
         if resp.status_code != 200:
             raise RuntimeError(f"Audio download failed: {resp.status_code}")

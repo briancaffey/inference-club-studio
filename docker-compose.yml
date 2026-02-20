@@ -58,7 +58,11 @@ services:
 
   celery-worker:
     <<: *backend-common
-    command: uv run watchfiles --filter python "celery -A app.celery_app worker --loglevel=info" /app/app
+    command: uv run watchfiles --filter python "celery -A app.celery_app worker --loglevel=info -Q celery" /app/app
+
+  celery-dia-worker:
+    <<: *backend-common
+    command: uv run watchfiles --filter python "celery -A app.celery_app worker --loglevel=info -Q dia --concurrency=1 --prefetch-multiplier=1 -n dia@%h" /app/app
 
   postgres:
     image: postgres:17

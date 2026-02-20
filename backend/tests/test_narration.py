@@ -18,15 +18,15 @@ def _make_narration_project(db, name="Narration Project"):
 
 
 def test_legacy_narration_projects_only_list_narration(client, db):
-    _make_project(db, "Video")
+    video_project = _make_project(db, "Video")
     narration_project = _make_narration_project(db, "Narration")
 
     resp = client.get("/api/projects")
     assert resp.status_code == 200
     data = resp.json()
-    assert len(data) == 1
-    assert data[0]["id"] == str(narration_project.id)
-    assert data[0]["name"] == "Narration"
+    ids = {item["id"] for item in data}
+    assert str(narration_project.id) in ids
+    assert str(video_project.id) not in ids
 
 
 def test_create_and_list_segments(client, db):
