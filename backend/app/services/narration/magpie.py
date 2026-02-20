@@ -76,7 +76,9 @@ async def generate(text: str, output_path: str, voice: str | None = None) -> str
         )
 
         if resp.status_code != 200:
-            raise RuntimeError(f"Magpie synthesis failed: {resp.status_code} {resp.text}")
+            raise RuntimeError(
+                f"Magpie synthesis failed: {resp.status_code} {resp.text}"
+            )
 
         with open(output_path, "wb") as f:
             f.write(resp.content)

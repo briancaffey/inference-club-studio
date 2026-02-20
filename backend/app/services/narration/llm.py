@@ -18,11 +18,11 @@ import httpx
 logger = logging.getLogger(__name__)
 
 OPENAI_BASE_URL = os.environ.get("OPENAI_BASE_URL", "http://192.168.6.19:8002/v1")
-OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16")
+OPENAI_MODEL = os.environ.get(
+    "OPENAI_MODEL", "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16"
+)
 OPENAI_API_KEY = (
-    os.environ.get("OPENAI_API_KEY")
-    or os.environ.get("GROQ_API_KEY")
-    or "not-needed"
+    os.environ.get("OPENAI_API_KEY") or os.environ.get("GROQ_API_KEY") or "not-needed"
 )
 LLM_MAX_TOKENS = int(os.environ.get("LLM_MAX_TOKENS", "4096"))
 LLM_TEMPERATURE = float(os.environ.get("LLM_TEMPERATURE", "0.3"))
@@ -54,9 +54,11 @@ If the input has no speakable content, return [].\
 # ---------------------------------------------------------------------------
 
 # Sentence-ending punctuation followed by whitespace
-_SENTENCE_RE = re.compile(r'(?<=[.!?])\s+')
+_SENTENCE_RE = re.compile(r"(?<=[.!?])\s+")
 # Markdown headings, horizontal rules, image/link syntax
-_MD_BLOCK_RE = re.compile(r'^#{1,6}\s+|^[-*_]{3,}\s*$|^!\[.*?\]\(.*?\)\s*$', re.MULTILINE)
+_MD_BLOCK_RE = re.compile(
+    r"^#{1,6}\s+|^[-*_]{3,}\s*$|^!\[.*?\]\(.*?\)\s*$", re.MULTILINE
+)
 
 
 def _split_sentences(text: str) -> list[str]:
@@ -65,7 +67,9 @@ def _split_sentences(text: str) -> list[str]:
     return [p.strip() for p in parts if p.strip()]
 
 
-def split_into_chunks(text: str, max_chars: int = 500, min_chars: int = 100) -> list[str]:
+def split_into_chunks(
+    text: str, max_chars: int = 500, min_chars: int = 100
+) -> list[str]:
     """Split article text into chunks suitable for individual LLM processing.
 
     Strategy:
@@ -74,14 +78,14 @@ def split_into_chunks(text: str, max_chars: int = 500, min_chars: int = 100) -> 
     3. Short consecutive pieces get grouped together up to max_chars
     """
     # Split into paragraphs
-    paragraphs = re.split(r'\n\s*\n', text.strip())
+    paragraphs = re.split(r"\n\s*\n", text.strip())
     paragraphs = [p.strip() for p in paragraphs if p.strip()]
 
     # Break long paragraphs into sentences, keep short ones whole
     pieces: list[str] = []
     for para in paragraphs:
         # Collapse internal newlines to spaces (single newlines within a paragraph)
-        para = re.sub(r'\n', ' ', para).strip()
+        para = re.sub(r"\n", " ", para).strip()
         if len(para) <= max_chars:
             pieces.append(para)
         else:
@@ -109,6 +113,7 @@ def split_into_chunks(text: str, max_chars: int = 500, min_chars: int = 100) -> 
 # ---------------------------------------------------------------------------
 # LLM calls
 # ---------------------------------------------------------------------------
+
 
 async def _call_llm_chunk(client: httpx.AsyncClient, chunk: str) -> str:
     """Send a single chunk to the LLM for TTS cleanup. Returns raw content."""
@@ -158,6 +163,7 @@ def _parse_segments(content: str) -> list[str]:
 # Public API
 # ---------------------------------------------------------------------------
 
+
 async def process_single_chunk(text: str) -> list[str]:
     """Process a single chunk through the LLM for TTS cleanup.
 
@@ -181,12 +187,15 @@ async def split_article_for_tts(article_text: str) -> list[str]:
     timeout = httpx.Timeout(connect=10.0, read=120.0, write=10.0, pool=10.0)
 
     async with httpx.AsyncClient(timeout=timeout) as client:
+
         async def process(chunk: str) -> list[str]:
             async with semaphore:
                 content = await _call_llm_chunk(client, chunk)
                 return _parse_segments(content)
 
-        results = await asyncio.gather(*[process(c) for c in chunks], return_exceptions=True)
+        results = await asyncio.gather(
+            *[process(c) for c in chunks], return_exceptions=True
+        )
 
     all_segments = []
     for i, result in enumerate(results):
@@ -198,7 +207,9 @@ async def split_article_for_tts(article_text: str) -> list[str]:
     if not all_segments:
         raise RuntimeError("All chunks failed to process")
 
-    logger.info(f"LLM returned {len(all_segments)} total segments from {len(chunks)} chunks")
+    logger.info(
+        f"LLM returned {len(all_segments)} total segments from {len(chunks)} chunks"
+    )
     return all_segments
 
 
@@ -234,6 +245,7 @@ async def split_article_for_tts_streaming(article_text: str):
 
     try:
         async with httpx.AsyncClient(timeout=timeout) as client:
+
             async def process_chunk(i: int, chunk: str):
                 async with semaphore:
                     try:
@@ -242,9 +254,13 @@ async def split_article_for_tts_streaming(article_text: str):
                         await queue.put({"index": i, "segments": segments})
                     except Exception as e:
                         logger.error(f"Chunk {i+1}/{len(chunks)} failed: {e}")
-                        await queue.put({"index": i, "error": f"{type(e).__name__}: {e}"})
+                        await queue.put(
+                            {"index": i, "error": f"{type(e).__name__}: {e}"}
+                        )
 
-            tasks = [asyncio.create_task(process_chunk(i, c)) for i, c in enumerate(chunks)]
+            tasks = [
+                asyncio.create_task(process_chunk(i, c)) for i, c in enumerate(chunks)
+            ]
 
             completed = 0
             while completed < len(chunks):
@@ -284,7 +300,10 @@ async def split_article_for_tts_streaming(article_text: str):
 
     except httpx.ConnectError:
         base_url = OPENAI_BASE_URL.rstrip("/")
-        yield {"phase": "error", "detail": f"Could not connect to LLM at {base_url}. Is the service running?"}
+        yield {
+            "phase": "error",
+            "detail": f"Could not connect to LLM at {base_url}. Is the service running?",
+        }
         return
     except Exception as e:
         yield {"phase": "error", "detail": f"{type(e).__name__}: {e}"}
@@ -293,11 +312,16 @@ async def split_article_for_tts_streaming(article_text: str):
     elapsed = int(time.monotonic() - start)
 
     if total_segments == 0:
-        yield {"phase": "error", "detail": "All chunks failed to process or returned empty results."}
+        yield {
+            "phase": "error",
+            "detail": "All chunks failed to process or returned empty results.",
+        }
         return
 
     error_note = f" ({error_count} chunk(s) had errors)" if error_count else ""
-    logger.info(f"Processed {len(chunks)} chunks -> {total_segments} segments in {elapsed}s")
+    logger.info(
+        f"Processed {len(chunks)} chunks -> {total_segments} segments in {elapsed}s"
+    )
     yield {
         "phase": "done",
         "count": total_segments,

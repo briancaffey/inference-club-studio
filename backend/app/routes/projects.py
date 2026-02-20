@@ -53,9 +53,7 @@ def create_project(data: ProjectCreate, db: Session = Depends(get_db)):
 def list_projects(db: Session = Depends(get_db)):
     projects = db.query(Project).order_by(Project.created_at.desc()).all()
     cut_counts = dict(
-        db.query(Cut.project_id, func.count(Cut.id))
-        .group_by(Cut.project_id)
-        .all()
+        db.query(Cut.project_id, func.count(Cut.id)).group_by(Cut.project_id).all()
     )
     segment_counts = dict(
         db.query(NarrationSegment.project_id, func.count(NarrationSegment.id))
@@ -87,7 +85,9 @@ def get_project(project_id: uuid.UUID, db: Session = Depends(get_db)):
         .filter(NarrationSegment.project_id == project.id)
         .scalar()
     )
-    cuts = project.cuts if project.project_type == ProjectType.VIDEO_TO_VIDEO.value else []
+    cuts = (
+        project.cuts if project.project_type == ProjectType.VIDEO_TO_VIDEO.value else []
+    )
     return ProjectDetail(
         id=project.id,
         name=project.name,

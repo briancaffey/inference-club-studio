@@ -21,7 +21,7 @@ def sanitize_text(text: str) -> str:
 
     # Em dash / en dash → comma or hyphen
     s = s.replace("\u2014", ", ")  # —
-    s = s.replace("\u2013", "-")   # –
+    s = s.replace("\u2013", "-")  # –
 
     # Ellipsis character → three dots
     s = s.replace("\u2026", "...")

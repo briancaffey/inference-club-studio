@@ -4,7 +4,6 @@ import io
 
 from pydub import AudioSegment
 
-
 TARGET_SAMPLE_RATE = 44100
 TARGET_CHANNELS = 1
 TARGET_SAMPLE_WIDTH = 2  # 16-bit
