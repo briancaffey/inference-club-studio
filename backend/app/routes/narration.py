@@ -9,6 +9,7 @@ from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Literal
 
 import httpx
 import redis.asyncio as redis_async
@@ -25,7 +26,7 @@ from fastapi import (
 )
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import FileResponse, StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
@@ -82,6 +83,13 @@ VOICE_SAMPLE_ALLOWED_EXTENSIONS = {
     ".mkv",
     ".avi",
 }
+DEFAULT_SPLIT_TARGET_WORDS = 32
+MIN_SPLIT_TARGET_WORDS = 8
+MAX_SPLIT_TARGET_WORDS = 120
+SPLIT_MIN_RATIO = 0.7
+SPLIT_MAX_RATIO = 1.3
+SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+")
+WORD_RE = re.compile(r"[A-Za-z0-9']+")
 
 
 def _safe_unlink(path: str | None) -> None:
@@ -323,6 +331,147 @@ def _collect_project_audio_paths(project_id: uuid.UUID, db: Session) -> list[str
     return [p for (p,) in (segment_paths + variant_paths) if p]
 
 
+def _collect_segment_audio_paths(segment_id: int, db: Session) -> list[str]:
+    segment_path = (
+        db.query(NarrationSegment.audio_path)
+        .filter(
+            NarrationSegment.id == segment_id,
+            NarrationSegment.audio_path.isnot(None),
+        )
+        .all()
+    )
+    variant_paths = (
+        db.query(NarrationVariant.audio_path)
+        .filter(
+            NarrationVariant.segment_id == segment_id,
+            NarrationVariant.audio_path.isnot(None),
+        )
+        .all()
+    )
+    unique = {p for (p,) in (segment_path + variant_paths) if p}
+    return sorted(unique)
+
+
+def _count_words(text: str) -> int:
+    return len(WORD_RE.findall(text))
+
+
+def _normalize_sentence_spacing(text: str) -> str:
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _split_into_sentences(text: str) -> list[str]:
+    normalized = _normalize_sentence_spacing(text)
+    if not normalized:
+        return []
+    sentences = [part.strip() for part in SENTENCE_SPLIT_RE.split(normalized) if part]
+    return sentences or [normalized]
+
+
+def _word_bounds_for_target(target_words: int) -> tuple[int, int]:
+    min_words = max(MIN_SPLIT_TARGET_WORDS, int(round(target_words * SPLIT_MIN_RATIO)))
+    max_words = min(MAX_SPLIT_TARGET_WORDS, int(round(target_words * SPLIT_MAX_RATIO)))
+    if max_words < min_words:
+        max_words = min_words
+    return min_words, max_words
+
+
+def _group_penalty(
+    *,
+    word_count: int,
+    target_words: int,
+    min_words: int,
+    max_words: int,
+) -> float:
+    if min_words <= word_count <= max_words:
+        return abs(word_count - target_words)
+    if word_count < min_words:
+        return (min_words - word_count) * 8 + abs(word_count - target_words)
+    return (word_count - max_words) * 6 + abs(word_count - target_words)
+
+
+def _split_sentence_groups(
+    sentences: list[str],
+    *,
+    target_words: int,
+    min_words: int,
+    max_words: int,
+) -> list[list[str]]:
+    if not sentences:
+        return []
+
+    n = len(sentences)
+    sentence_word_counts = [_count_words(sentence) for sentence in sentences]
+    prefix_words = [0]
+    for count in sentence_word_counts:
+        prefix_words.append(prefix_words[-1] + count)
+
+    def span_words(start: int, end: int) -> int:
+        return prefix_words[end] - prefix_words[start]
+
+    best_cost = [float("inf")] * (n + 1)
+    next_break = [n] * (n + 1)
+    best_cost[n] = 0.0
+
+    for start in range(n - 1, -1, -1):
+        for end in range(start + 1, n + 1):
+            word_count = span_words(start, end)
+            penalty = _group_penalty(
+                word_count=word_count,
+                target_words=target_words,
+                min_words=min_words,
+                max_words=max_words,
+            )
+            total_cost = penalty + best_cost[end]
+
+            if total_cost < best_cost[start]:
+                best_cost[start] = total_cost
+                next_break[start] = end
+
+            if word_count > (max_words * 2) and end > start + 1:
+                break
+
+    groups: list[list[str]] = []
+    index = 0
+    while index < n:
+        next_index = next_break[index]
+        if next_index <= index:
+            next_index = index + 1
+        groups.append(sentences[index:next_index])
+        index = next_index
+
+    return groups
+
+
+def _build_split_groups(
+    text: str,
+    target_words: int,
+) -> tuple[list[dict], int, int]:
+    min_words, max_words = _word_bounds_for_target(target_words)
+    sentences = _split_into_sentences(text)
+    sentence_groups = _split_sentence_groups(
+        sentences,
+        target_words=target_words,
+        min_words=min_words,
+        max_words=max_words,
+    )
+
+    groups: list[dict] = []
+    for sentence_group in sentence_groups:
+        group_text = _normalize_sentence_spacing(" ".join(sentence_group))
+        if not group_text:
+            continue
+        groups.append(
+            {
+                "text": group_text,
+                "word_count": _count_words(group_text),
+                "sentence_count": len(sentence_group),
+            }
+        )
+
+    return groups, min_words, max_words
+
+
 def _upsert_transcription(
     db: Session,
     segment_id: int,
@@ -522,6 +671,14 @@ class SegmentUpdate(BaseModel):
     magpie_voice: str | None = None
 
 
+class SegmentSplitRequest(BaseModel):
+    target_words: int = Field(
+        default=DEFAULT_SPLIT_TARGET_WORDS,
+        ge=MIN_SPLIT_TARGET_WORDS,
+        le=MAX_SPLIT_TARGET_WORDS,
+    )
+
+
 class ReorderItem(BaseModel):
     id: int
     position: int
@@ -556,6 +713,7 @@ class RegenerateRequest(BaseModel):
 class TrimRequest(BaseModel):
     start_ms: int
     end_ms: int
+    mode: Literal["keep", "remove"] = "keep"
 
 
 class VoiceSampleDraftTrimRequest(BaseModel):
@@ -733,6 +891,107 @@ async def api_update_segment(
     db.commit()
     db.refresh(segment)
     return _segment_to_dict(segment)
+
+
+@router.post("/api/segments/{segment_id}/split/preview")
+async def api_preview_split_segment(
+    segment_id: int,
+    body: SegmentSplitRequest,
+    db: Session = Depends(get_db),
+):
+    segment = (
+        db.query(NarrationSegment).filter(NarrationSegment.id == segment_id).first()
+    )
+    if not segment:
+        raise HTTPException(404, "Segment not found")
+
+    groups, min_words, max_words = _build_split_groups(
+        segment.text,
+        body.target_words,
+    )
+
+    return {
+        "segment_id": segment.id,
+        "target_words": body.target_words,
+        "min_words": min_words,
+        "max_words": max_words,
+        "can_split": len(groups) > 1,
+        "groups": groups,
+    }
+
+
+@router.post("/api/segments/{segment_id}/split")
+async def api_split_segment(
+    segment_id: int,
+    body: SegmentSplitRequest,
+    db: Session = Depends(get_db),
+):
+    segment = (
+        db.query(NarrationSegment).filter(NarrationSegment.id == segment_id).first()
+    )
+    if not segment:
+        raise HTTPException(404, "Segment not found")
+
+    groups, min_words, max_words = _build_split_groups(
+        segment.text,
+        body.target_words,
+    )
+    if len(groups) < 2:
+        raise HTTPException(
+            400,
+            "Segment could not be split into multiple sentence groups",
+        )
+
+    project_id = segment.project_id
+    original_position = segment.position
+    service = segment.service
+    voice_sample_id = segment.voice_sample_id
+    magpie_voice = segment.magpie_voice
+    original_text = segment.original_text
+    audio_paths_to_delete = _collect_segment_audio_paths(segment.id, db)
+
+    position_delta = len(groups) - 1
+    if position_delta > 0:
+        db.query(NarrationSegment).filter(
+            NarrationSegment.project_id == project_id,
+            NarrationSegment.position > original_position,
+        ).update(
+            {NarrationSegment.position: NarrationSegment.position + position_delta},
+            synchronize_session=False,
+        )
+
+    db.delete(segment)
+
+    for index, group in enumerate(groups):
+        text = group["text"]
+        db.add(
+            NarrationSegment(
+                project_id=project_id,
+                position=original_position + index,
+                text=text,
+                sanitized_text=sanitize_text(text),
+                service=service,
+                status="pending",
+                voice_sample_id=voice_sample_id,
+                magpie_voice=magpie_voice,
+                original_text=original_text,
+            )
+        )
+
+    db.commit()
+
+    for path in audio_paths_to_delete:
+        _safe_unlink(path)
+
+    return {
+        "project_id": project_id,
+        "replaced_segment_id": segment_id,
+        "target_words": body.target_words,
+        "min_words": min_words,
+        "max_words": max_words,
+        "created_count": len(groups),
+        "segments": [_segment_to_dict(item) for item in _list_segments(project_id, db)],
+    }
 
 
 @router.delete("/api/segments/{segment_id}")
@@ -1259,13 +1518,16 @@ async def api_trim_segment(
     duration_ms = max(1, int(round(get_wav_duration(segment.audio_path) * 1000)))
     start_ms = max(0, body.start_ms)
     end_ms = min(duration_ms, body.end_ms)
+    trim_mode = body.mode
 
     if end_ms <= start_ms:
         raise HTTPException(400, "Trim end must be greater than trim start")
     if end_ms - start_ms < 50:
         raise HTTPException(400, "Trim range must be at least 50ms")
+    if trim_mode == "remove" and duration_ms - (end_ms - start_ms) < 50:
+        raise HTTPException(400, "Trim must leave at least 50ms of audio")
 
-    new_duration = trim_audio(segment.audio_path, start_ms, end_ms)
+    new_duration = trim_audio(segment.audio_path, start_ms, end_ms, mode=trim_mode)
     rounded_duration = round(new_duration, 2)
     segment.duration_seconds = rounded_duration
 

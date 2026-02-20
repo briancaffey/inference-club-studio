@@ -45,6 +45,17 @@ class NarrationQualityResult:
     reason: str
 
 
+def _groq_reasoning_options(base_url: str) -> dict:
+    """Return Groq-compatible low-reasoning request options."""
+    if "groq.com" not in base_url.lower():
+        return {}
+    return {
+        "reasoning_effort": "low",
+        # Keep reasoning hidden in API responses.
+        "include_reasoning": False,
+    }
+
+
 def _strip_code_fences(text: str) -> str:
     text = text.strip()
     if text.startswith("```"):
@@ -119,7 +130,6 @@ async def evaluate_narration_quality(
     api_key = settings.openai_api_key or settings.groq_api_key or "not-needed"
 
     payload = {
-        "chat_template_kwargs": {"enable_thinking": False},
         "model": settings.openai_model,
         "messages": [
             {"role": "system", "content": QUALITY_PROMPT},
@@ -133,6 +143,7 @@ async def evaluate_narration_quality(
         ],
         "max_tokens": 256,
         "temperature": 0.1,
+        **_groq_reasoning_options(base_url),
     }
 
     timeout = httpx.Timeout(connect=10.0, read=60.0, write=10.0, pool=10.0)

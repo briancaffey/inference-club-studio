@@ -166,7 +166,7 @@ export interface InferenceServicesHealthResponse {
 }
 
 export type NarrationService = 'dia' | 'magpie'
-export type NarrationSegmentStatus = 'pending' | 'generating' | 'done' | 'error'
+export type NarrationSegmentStatus = 'pending' | 'queued' | 'generating' | 'done' | 'error'
 
 export interface NarrationSegment {
   id: number
@@ -231,4 +231,29 @@ export interface NarrationTranscription {
   text: string
   words: NarrationWord[]
   created_at: string
+}
+
+export interface NarrationSplitPreviewGroup {
+  text: string
+  word_count: number
+  sentence_count: number
+}
+
+export interface NarrationSegmentSplitPreview {
+  segment_id: number
+  target_words: number
+  min_words: number
+  max_words: number
+  can_split: boolean
+  groups: NarrationSplitPreviewGroup[]
+}
+
+export interface NarrationSegmentSplitResult {
+  project_id: string
+  replaced_segment_id: number
+  target_words: number
+  min_words: number
+  max_words: number
+  created_count: number
+  segments: NarrationSegment[]
 }

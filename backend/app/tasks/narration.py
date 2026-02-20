@@ -219,26 +219,36 @@ def _run_single_attempt(
     else:
         raise RuntimeError(f"Unknown service: {segment.service}")
 
-    duration = round(get_wav_duration(str(output_path)), 2)
-    transcription_text, words = asyncio.run(transcribe_audio_file(str(output_path)))
-    quality = asyncio.run(
-        evaluate_narration_quality(
-            original_text=sanitized_text or raw_text,
-            transcription_text=transcription_text,
-        )
-    )
-
     variant = NarrationVariant(
         segment_id=segment.id,
         text=raw_text,
         sanitized_text=sanitized_text,
         service=segment.service,
         audio_path=str(output_path),
-        duration_seconds=duration,
+        duration_seconds=round(get_wav_duration(str(output_path)), 2),
     )
     db.add(variant)
     db.commit()
     db.refresh(variant)
+
+    transcription_text = ""
+    words: list[dict] = []
+    try:
+        transcription_text, words = asyncio.run(transcribe_audio_file(str(output_path)))
+    except Exception as exc:
+        logger.warning(
+            "STT failed for segment %s attempt %s; keeping audio for review: %s",
+            segment.id,
+            attempt,
+            exc,
+        )
+
+    quality = asyncio.run(
+        evaluate_narration_quality(
+            original_text=sanitized_text or raw_text,
+            transcription_text=transcription_text,
+        )
+    )
 
     logger.info(
         "Narration quality for segment %s attempt %s: score=%s regenerate=%s reason=%s",
@@ -252,7 +262,7 @@ def _run_single_attempt(
     return AttemptResult(
         attempt=attempt,
         output_path=str(output_path),
-        duration_seconds=duration,
+        duration_seconds=variant.duration_seconds or 0.0,
         transcription_text=transcription_text,
         transcription_words=words,
         quality=quality,
@@ -300,12 +310,17 @@ def _finalize_needs_review(
             f"{best_result.quality.score}/10 after {MAX_GENERATION_ATTEMPTS} attempts. "
             f"{best_result.quality.reason}"
         )[:1000]
-        _upsert_transcription(
-            db,
-            segment.id,
-            best_result.transcription_text,
-            best_result.transcription_words,
-        )
+        if best_result.transcription_text.strip() or best_result.transcription_words:
+            _upsert_transcription(
+                db,
+                segment.id,
+                best_result.transcription_text,
+                best_result.transcription_words,
+            )
+        else:
+            db.query(NarrationTranscription).filter(
+                NarrationTranscription.segment_id == segment.id
+            ).delete(synchronize_session=False)
     else:
         segment.audio_path = None
         segment.duration_seconds = None

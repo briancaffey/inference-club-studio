@@ -21,6 +21,8 @@ import type {
   NarrationVariant,
   NarrationVoiceSampleDraft,
   NarrationVoiceSample,
+  NarrationSegmentSplitPreview,
+  NarrationSegmentSplitResult,
 } from '~/types'
 
 interface ArticleChunk {
@@ -56,6 +58,7 @@ interface TrimResponse {
 }
 
 type TrimHandle = 'start' | 'end'
+type SegmentStatusFilter = 'all' | 'pending' | 'queued' | 'generating' | 'done' | 'error'
 
 const props = defineProps<{
   projectId: string
@@ -83,6 +86,11 @@ const expandedTranscript = ref<number | null>(null)
 const expandedTrim = ref<number | null>(null)
 const regenText = reactive<Record<number, string>>({})
 const confirmClear = ref(false)
+const splitSegmentId = ref<number | null>(null)
+const splitTargetWords = ref(32)
+const splitPreview = ref<NarrationSegmentSplitPreview | null>(null)
+const splitPreviewLoading = ref(false)
+const splitApplying = ref(false)
 
 const showImport = ref(false)
 const importMode = ref<'script' | 'article'>('script')
@@ -152,15 +160,23 @@ const trimEnd = ref(0)
 const trimWaveformData = ref<Float32Array | null>(null)
 const trimAudioDuration = ref(1)
 const trimApplying = ref(false)
-const trimDragging = ref<TrimHandle | null>(null)
+const trimSelectionArmed = ref(false)
+const trimSelecting = ref(false)
+const trimSelectionAnchorMs = ref(0)
 const trimSegmentId = ref<number | null>(null)
 const trimDecodedBuffer = ref<AudioBuffer | null>(null)
+const trimWaveformLoading = ref(false)
+const trimWaveformError = ref('')
 
 const generating = ref(false)
 const cancelling = ref(false)
 const genIndex = ref(0)
 const genTotal = ref(0)
 const genEstimate = ref<number | null>(null)
+const queuedSegmentIds = reactive(new Set<number>())
+const collapsedSegmentIds = reactive(new Set<number>())
+const segmentStatusFilter = ref<SegmentStatusFilter>('all')
+const doneTrimSuggestedOnly = ref(false)
 
 let ws: WebSocket | null = null
 let wsReconnectTimer: ReturnType<typeof setTimeout> | null = null
@@ -172,18 +188,44 @@ let trimPreviewSource: AudioBufferSourceNode | null = null
 let wordTrackScrollTarget = 0
 let wordTrackAnimating = false
 let projectVoiceDefaultsRequestId = 0
+let trimWaveformRequestId = 0
 
 const MIN_TIMELINE_SEGMENT_PX = 56
 const MIN_TRIM_GAP_MS = 50
 const MIN_TIMELINE_ZOOM_LEVEL = 0.25
 const MAX_TIMELINE_ZOOM_LEVEL = 4
+const DEFAULT_SPLIT_TARGET_WORDS = 32
+const MIN_SPLIT_TARGET_WORDS = 8
+const MAX_SPLIT_TARGET_WORDS = 120
 const PROJECT_NARRATION_DEFAULTS_KEY = 'narration_defaults'
 const PROJECT_DIA_DEFAULT_VOICE_KEY = 'dia_voice_sample_id'
 const PROJECT_MAGPIE_DEFAULT_VOICE_KEY = 'magpie_voice'
 
-const pendingCount = computed(() => segments.value.filter(segment => segment.status !== 'done').length)
-const doneCount = computed(() => segments.value.filter(segment => segment.status === 'done').length)
-const errorCount = computed(() => segments.value.filter(segment => segment.status === 'error').length)
+const pendingCount = computed(() => segments.value.filter(segment => segmentDisplayStatus(segment) === 'pending').length)
+const queuedCount = computed(() => segments.value.filter(segment => segmentDisplayStatus(segment) === 'queued').length)
+const generatingCount = computed(() => segments.value.filter(segment => segmentDisplayStatus(segment) === 'generating').length)
+const doneCount = computed(() => segments.value.filter(segment => segmentDisplayStatus(segment) === 'done').length)
+const errorCount = computed(() => segments.value.filter(segment => segmentDisplayStatus(segment) === 'error').length)
+const trimSuggestedDoneCount = computed(() => (
+  segments.value.filter(segment => segmentDisplayStatus(segment) === 'done' && segmentNeedsTrim(segment)).length
+))
+const filteredSegments = computed(() => {
+  const statusFiltered = segmentStatusFilter.value === 'all'
+    ? segments.value
+    : segments.value.filter(segment => segmentDisplayStatus(segment) === segmentStatusFilter.value)
+
+  if (segmentStatusFilter.value === 'done' && doneTrimSuggestedOnly.value) {
+    return statusFiltered.filter(segment => segmentNeedsTrim(segment))
+  }
+
+  return statusFiltered
+})
+const hasCollapsedFilteredSegments = computed(() => (
+  filteredSegments.value.some(segment => collapsedSegmentIds.has(segment.id))
+))
+const hasExpandedFilteredSegments = computed(() => (
+  filteredSegments.value.some(segment => !collapsedSegmentIds.has(segment.id))
+))
 const hasAudio = computed(() => doneCount.value > 0)
 const genProgress = computed(() => {
   if (!genTotal.value) return 0
@@ -236,11 +278,18 @@ const timelineViewportLeft = computed(() => {
   if (maxScroll <= 0) return 0
   return timelineScrollLeft.value / maxScroll
 })
+const trimSelectionStart = computed(() => Math.min(trimStart.value, trimEnd.value))
+const trimSelectionEnd = computed(() => Math.max(trimStart.value, trimEnd.value))
+const trimSelectionDuration = computed(() => Math.max(0, trimSelectionEnd.value - trimSelectionStart.value))
+const hasTrimSelection = computed(() => trimSelectionDuration.value >= MIN_TRIM_GAP_MS)
 const trimRangeLabel = computed(() => {
-  const startSeconds = (trimStart.value / 1000).toFixed(2)
-  const endSeconds = (trimEnd.value / 1000).toFixed(2)
-  const durationSeconds = ((trimEnd.value - trimStart.value) / 1000).toFixed(2)
-  return `${startSeconds}s - ${endSeconds}s (${durationSeconds}s)`
+  if (!hasTrimSelection.value) {
+    return 'No deadspace selected'
+  }
+  const startSeconds = (trimSelectionStart.value / 1000).toFixed(2)
+  const endSeconds = (trimSelectionEnd.value / 1000).toFixed(2)
+  const durationSeconds = (trimSelectionDuration.value / 1000).toFixed(2)
+  return `Remove ${startSeconds}s - ${endSeconds}s (${durationSeconds}s)`
 })
 const voiceDraftDurationMs = computed(() => {
   if (voiceDraftAudioDurationMs.value && voiceDraftAudioDurationMs.value >= MIN_TRIM_GAP_MS) {
@@ -276,9 +325,49 @@ function formatDuration(seconds: number) {
   return `${mins}:${secs.toString().padStart(2, '0')}`
 }
 
+function segmentPreviewText(text: string, maxWords = 9) {
+  const trimmed = text.trim()
+  if (!trimmed) return ''
+  const words = trimmed.split(/\s+/)
+  if (words.length <= maxWords) return trimmed
+  return `${words.slice(0, maxWords).join(' ')} ...`
+}
+
+function segmentDisplayStatus(segment: NarrationSegment) {
+  if (segment.status === 'generating') return 'generating'
+  if (segment.status === 'queued') return 'queued'
+  if (queuedSegmentIds.has(segment.id)) return 'queued'
+  return segment.status
+}
+
+function isSegmentCollapsed(segmentId: number) {
+  return collapsedSegmentIds.has(segmentId)
+}
+
+function toggleSegmentCollapsed(segmentId: number) {
+  if (collapsedSegmentIds.has(segmentId)) {
+    collapsedSegmentIds.delete(segmentId)
+    return
+  }
+  collapsedSegmentIds.add(segmentId)
+}
+
+function collapseFilteredSegments() {
+  for (const segment of filteredSegments.value) {
+    collapsedSegmentIds.add(segment.id)
+  }
+}
+
+function expandFilteredSegments() {
+  for (const segment of filteredSegments.value) {
+    collapsedSegmentIds.delete(segment.id)
+  }
+}
+
 function statusClass(segmentStatus: string) {
   if (segmentStatus === 'done') return 'bg-green-100 text-green-800 dark:bg-green-900/40 dark:text-green-300'
   if (segmentStatus === 'generating') return 'bg-blue-100 text-blue-800 dark:bg-blue-900/40 dark:text-blue-300'
+  if (segmentStatus === 'queued') return 'bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-300'
   if (segmentStatus === 'error') return 'bg-red-100 text-red-800 dark:bg-red-900/40 dark:text-red-300'
   return 'bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-300'
 }
@@ -317,10 +406,49 @@ function segmentAudioChanged(previous: NarrationSegment, next: NarrationSegment)
   )
 }
 
+function normalizedSplitTargetWords() {
+  const parsed = Number(splitTargetWords.value)
+  if (!Number.isFinite(parsed)) {
+    splitTargetWords.value = DEFAULT_SPLIT_TARGET_WORDS
+    return DEFAULT_SPLIT_TARGET_WORDS
+  }
+  const rounded = Math.round(parsed)
+  const clamped = Math.max(
+    MIN_SPLIT_TARGET_WORDS,
+    Math.min(MAX_SPLIT_TARGET_WORDS, rounded),
+  )
+  splitTargetWords.value = clamped
+  return clamped
+}
+
+function resetSplitState(options: { keepTarget?: boolean } = {}) {
+  splitSegmentId.value = null
+  splitPreview.value = null
+  splitPreviewLoading.value = false
+  splitApplying.value = false
+  if (!options.keepTarget) {
+    splitTargetWords.value = DEFAULT_SPLIT_TARGET_WORDS
+  }
+}
+
 function setSegments(list: NarrationSegment[]) {
   const previousById = new Map(segments.value.map(segment => [segment.id, segment]))
   const ordered = sortSegments(list)
   const validIds = new Set(ordered.map(segment => segment.id))
+
+  for (const queuedId of [...queuedSegmentIds]) {
+    if (!validIds.has(queuedId)) {
+      queuedSegmentIds.delete(queuedId)
+    }
+  }
+  for (const collapsedId of [...collapsedSegmentIds]) {
+    if (!validIds.has(collapsedId)) {
+      collapsedSegmentIds.delete(collapsedId)
+    }
+  }
+  if (splitSegmentId.value !== null && !validIds.has(splitSegmentId.value)) {
+    resetSplitState({ keepTarget: true })
+  }
 
   for (const segment of segments.value) {
     if (validIds.has(segment.id)) continue
@@ -1321,6 +1449,64 @@ async function saveEdit(segmentId: number) {
   }
 }
 
+async function refreshSplitPreview(segmentId: number) {
+  const targetWords = normalizedSplitTargetWords()
+  splitPreviewLoading.value = true
+
+  try {
+    const preview = await $fetch<NarrationSegmentSplitPreview>(`${baseURL}/api/segments/${segmentId}/split/preview`, {
+      method: 'POST',
+      body: { target_words: targetWords },
+    })
+    if (splitSegmentId.value === segmentId) {
+      splitPreview.value = preview
+    }
+  } catch (err: any) {
+    if (splitSegmentId.value === segmentId) {
+      splitPreview.value = null
+    }
+    status.value = err?.data?.detail || 'Failed to preview split'
+  } finally {
+    splitPreviewLoading.value = false
+  }
+}
+
+async function openSplitPreview(segmentId: number) {
+  if (splitSegmentId.value === segmentId) {
+    resetSplitState({ keepTarget: true })
+    return
+  }
+
+  splitSegmentId.value = segmentId
+  splitPreview.value = null
+  await refreshSplitPreview(segmentId)
+}
+
+async function applySegmentSplit(segmentId: number) {
+  if (splitApplying.value || splitPreviewLoading.value) return
+  if (splitSegmentId.value !== segmentId || !splitPreview.value?.can_split) return
+
+  splitApplying.value = true
+  const targetWords = normalizedSplitTargetWords()
+
+  try {
+    const payload = await $fetch<NarrationSegmentSplitResult>(`${baseURL}/api/segments/${segmentId}/split`, {
+      method: 'POST',
+      body: { target_words: targetWords },
+    })
+
+    setSegments(payload.segments)
+    await fetchProjectTranscriptions()
+
+    status.value = `Segment split into ${payload.created_count} segments`
+    resetSplitState({ keepTarget: true })
+  } catch (err: any) {
+    status.value = err?.data?.detail || 'Failed to split segment'
+  } finally {
+    splitApplying.value = false
+  }
+}
+
 async function onSegmentServiceChange(segment: NarrationSegment, event: Event) {
   const target = event.target as HTMLSelectElement
   const service = target.value as NarrationService
@@ -1374,9 +1560,7 @@ async function deleteSegment(segmentId: number) {
 
     if (expandedTrim.value === segmentId) {
       expandedTrim.value = null
-      trimSegmentId.value = null
-      trimWaveformData.value = null
-      trimDecodedBuffer.value = null
+      resetTrimWaveformState()
     }
 
     await fetchSegments()
@@ -1416,9 +1600,7 @@ async function clearAllSegments() {
     }
 
     expandedTrim.value = null
-    trimSegmentId.value = null
-    trimWaveformData.value = null
-    trimDecodedBuffer.value = null
+    resetTrimWaveformState()
 
     await fetchSegments()
   } catch (err: any) {
@@ -1680,6 +1862,7 @@ async function generateOne(segmentId: number) {
   try {
     await patchGlobalVoice([segmentId])
     await $fetch(`${baseURL}/api/segments/${segmentId}/generate`, { method: 'POST' })
+    queuedSegmentIds.add(segmentId)
   } catch (err: any) {
     status.value = err?.data?.detail || 'Generation request failed'
   }
@@ -1693,6 +1876,7 @@ async function regenerate(segmentId: number) {
       method: 'POST',
       body: text ? { text } : {},
     })
+    queuedSegmentIds.add(segmentId)
     regenText[segmentId] = ''
   } catch (err: any) {
     status.value = err?.data?.detail || 'Regeneration request failed'
@@ -1706,6 +1890,9 @@ async function generateAll() {
   try {
     await patchGlobalVoice(pending)
     await $fetch(`${baseURL}/api/projects/${props.projectId}/generate/all`, { method: 'POST' })
+    for (const segmentId of pending) {
+      queuedSegmentIds.add(segmentId)
+    }
   } catch (err: any) {
     status.value = err?.data?.detail || 'Generate-all request failed'
   }
@@ -1718,6 +1905,9 @@ async function retryFailed() {
   try {
     await patchGlobalVoice(failures)
     await $fetch(`${baseURL}/api/projects/${props.projectId}/generate/failed`, { method: 'POST' })
+    for (const segmentId of failures) {
+      queuedSegmentIds.add(segmentId)
+    }
   } catch (err: any) {
     status.value = err?.data?.detail || 'Retry request failed'
   }
@@ -2130,51 +2320,90 @@ function segmentNeedsTrim(segment: NarrationSegment) {
   return firstWordStart > 0.3 || (segment.duration_seconds - lastWordEnd) > 0.5
 }
 
-async function toggleTrim(segmentId: number) {
+function toggleTrim(segmentId: number) {
   if (expandedTrim.value === segmentId) {
-    expandedTrim.value = null
-    trimSegmentId.value = null
-    trimWaveformData.value = null
-    trimDecodedBuffer.value = null
+    cancelTrimDeadspace()
     return
   }
 
   expandedTrim.value = segmentId
+  stopTrimPreview()
+  resetTrimSelectionState()
+  trimWaveformError.value = ''
 
   if (!transcriptions[segmentId]) {
     void transcribeSegment(segmentId, { silent: true })
   }
-
-  await loadTrimWaveform(segmentId)
 }
 
 async function loadTrimWaveform(segmentId: number) {
   const segment = segments.value.find(item => item.id === segmentId)
   if (!segment || segment.status !== 'done' || !segment.audio_path) return
 
-  const expectedVersion = audioVersion[segmentId] || 0
+  const requestId = ++trimWaveformRequestId
+  trimWaveformLoading.value = true
+  trimWaveformError.value = ''
 
   try {
-    const decoded = await decodeSegmentAudio(segmentId, expectedVersion)
-    if (!decoded) return
-    if ((audioVersion[segmentId] || 0) !== expectedVersion) return
+    let decoded: AudioBuffer | null = null
+    let lastError: unknown = null
+
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      if (requestId !== trimWaveformRequestId || expandedTrim.value !== segmentId) {
+        return
+      }
+
+      const expectedVersion = audioVersion[segmentId] || 0
+      try {
+        decoded = await decodeSegmentAudio(segmentId, expectedVersion)
+      } catch (err) {
+        lastError = err
+      }
+
+      if (decoded) break
+      await new Promise(resolve => setTimeout(resolve, 120))
+    }
+
+    if (requestId !== trimWaveformRequestId || expandedTrim.value !== segmentId) {
+      return
+    }
+
+    if (!decoded) {
+      trimWaveformData.value = null
+      trimDecodedBuffer.value = null
+      resetTrimSelectionState()
+      trimWaveformError.value = 'Could not load waveform. Try again.'
+      if (lastError) {
+        console.error('Failed to load trim waveform', lastError)
+      }
+      return
+    }
 
     trimSegmentId.value = segmentId
     trimDecodedBuffer.value = decoded
     trimAudioDuration.value = Math.max(1, Math.round(decoded.duration * 1000))
     trimWaveformData.value = buildWaveformSamples(decoded.getChannelData(0), 520)
 
-    trimStart.value = 0
-    trimEnd.value = trimAudioDuration.value
+    resetTrimSelectionState()
 
     await nextTick()
     drawTrimWaveform(segmentId)
+    trimWaveformError.value = ''
   } catch (err) {
+    if (requestId !== trimWaveformRequestId) return
+    trimWaveformData.value = null
+    trimDecodedBuffer.value = null
+    resetTrimSelectionState()
+    trimWaveformError.value = 'Could not load waveform. Try again.'
     console.error('Failed to load trim waveform', err)
+  } finally {
+    if (requestId === trimWaveformRequestId) {
+      trimWaveformLoading.value = false
+    }
   }
 }
 
-function drawTrimWaveform(segmentId: number) {
+function drawTrimWaveform(segmentId: number, attempt = 0) {
   if (!import.meta.client) return
   if (trimSegmentId.value !== segmentId) return
 
@@ -2182,7 +2411,20 @@ function drawTrimWaveform(segmentId: number) {
   if (!samples) return
 
   const canvas = document.getElementById(`trim-waveform-${segmentId}`) as HTMLCanvasElement | null
-  if (!canvas) return
+  if (!canvas) {
+    if (attempt < 6) {
+      requestAnimationFrame(() => drawTrimWaveform(segmentId, attempt + 1))
+    }
+    return
+  }
+
+  const rect = canvas.getBoundingClientRect()
+  if (rect.width < 4 || rect.height < 4) {
+    if (attempt < 6) {
+      requestAnimationFrame(() => drawTrimWaveform(segmentId, attempt + 1))
+    }
+    return
+  }
 
   const frame = applyCanvasResolution(canvas)
   if (!frame) return
@@ -2197,15 +2439,18 @@ function drawTrimWaveform(segmentId: number) {
   const barWidth = Math.max(1, gap - 0.5)
   const midY = height / 2
   const isDark = document.documentElement.classList.contains('dark')
+  const removeStartMs = trimSelectionStart.value
+  const removeEndMs = trimSelectionEnd.value
+  const hasSelection = hasTrimSelection.value
 
   for (let i = 0; i < samples.length; i += 1) {
     const ms = (i / samples.length) * totalMs
-    const inRange = ms >= trimStart.value && ms <= trimEnd.value
+    const inRemovedRange = hasSelection && ms >= removeStartMs && ms <= removeEndMs
     const barHeight = Math.max(1, samples[i] * (height * 0.78))
 
-    context.fillStyle = inRange
-      ? (isDark ? 'rgba(99,102,241,0.72)' : 'rgba(79,70,229,0.62)')
-      : (isDark ? 'rgba(107,114,128,0.26)' : 'rgba(156,163,175,0.32)')
+    context.fillStyle = inRemovedRange
+      ? (isDark ? 'rgba(248,113,113,0.74)' : 'rgba(239,68,68,0.64)')
+      : (isDark ? 'rgba(56,189,248,0.36)' : 'rgba(14,165,233,0.3)')
 
     context.fillRect(i * gap, midY - (barHeight / 2), barWidth, barHeight)
   }
@@ -2223,66 +2468,189 @@ function drawTrimWaveform(segmentId: number) {
     const startMs = mapper.map(word.start * 1000)
     const endMs = mapper.map(word.end * 1000)
     const x = Math.max(0, Math.min(width - 1, (startMs / totalMs) * width))
-    const inRange = startMs >= trimStart.value && endMs <= trimEnd.value
+    const inRemovedRange = hasSelection && startMs >= removeStartMs && endMs <= removeEndMs
 
-    context.fillStyle = inRange
-      ? (isDark ? 'rgba(168,85,247,0.78)' : 'rgba(147,51,234,0.6)')
-      : (isDark ? 'rgba(107,114,128,0.38)' : 'rgba(148,163,184,0.42)')
+    context.fillStyle = inRemovedRange
+      ? (isDark ? 'rgba(248,113,113,0.85)' : 'rgba(220,38,38,0.72)')
+      : (isDark ? 'rgba(125,211,252,0.56)' : 'rgba(3,105,161,0.48)')
 
     context.fillRect(x, height - 14, 1, 14)
 
     // Keep text labels on the marker itself (overlap is intentional).
-    context.fillStyle = inRange
-      ? (isDark ? 'rgba(216,180,254,0.95)' : 'rgba(126,34,206,0.82)')
-      : (isDark ? 'rgba(148,163,184,0.52)' : 'rgba(100,116,139,0.52)')
+    context.fillStyle = inRemovedRange
+      ? (isDark ? 'rgba(254,202,202,0.95)' : 'rgba(127,29,29,0.86)')
+      : (isDark ? 'rgba(186,230,253,0.95)' : 'rgba(8,47,73,0.78)')
     context.fillText(word.word, Math.min(width - 2, x + 2), height - 3)
   }
 }
 
-function autoSuggestTrim() {
+function stopTrimPreview() {
+  if (!trimPreviewSource) return
+  try {
+    trimPreviewSource.stop()
+  } catch {
+    // no-op
+  }
+  trimPreviewSource.disconnect()
+  trimPreviewSource = null
+}
+
+function resetTrimSelectionState() {
+  trimStart.value = 0
+  trimEnd.value = 0
+  trimSelectionArmed.value = false
+  trimSelecting.value = false
+  trimSelectionAnchorMs.value = 0
+}
+
+function resetTrimWaveformState() {
+  trimWaveformRequestId += 1
+  trimSegmentId.value = null
+  trimWaveformData.value = null
+  trimDecodedBuffer.value = null
+  trimAudioDuration.value = 1
+  trimWaveformLoading.value = false
+  trimWaveformError.value = ''
+  resetTrimSelectionState()
+  stopTrimPreview()
+}
+
+function beginTrimSelection() {
+  if (!trimWaveformData.value || trimWaveformLoading.value) return
+  resetTrimSelectionState()
+  trimSelectionArmed.value = true
+}
+
+function clearTrimSelection() {
   const segmentId = expandedTrim.value
-  if (!segmentId) return
+  resetTrimSelectionState()
+  if (segmentId !== null) {
+    drawTrimWaveform(segmentId)
+  }
+}
 
-  const transcription = transcriptions[segmentId]
-  if (!transcription?.words?.length) return
+function cancelTrimDeadspace() {
+  if (expandedTrim.value === null) {
+    resetTrimWaveformState()
+    return
+  }
+  expandedTrim.value = null
+}
 
-  const firstStart = transcription.words[0].start * 1000
-  const lastEnd = transcription.words[transcription.words.length - 1].end * 1000
+function trimMsFromPointerX(clientX: number, rect: DOMRect) {
+  if (rect.width <= 0) return 0
+  const fraction = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width))
+  return Math.round(fraction * trimAudioDuration.value)
+}
 
-  trimStart.value = Math.max(0, Math.round(firstStart - 50))
-  trimEnd.value = Math.min(trimAudioDuration.value, Math.round(lastEnd + 50))
+function onTrimWaveformPointerDown(event: PointerEvent, segmentId: number) {
+  if (
+    !trimSelectionArmed.value
+    || trimWaveformLoading.value
+    || !trimWaveformData.value
+    || trimSegmentId.value !== segmentId
+  ) {
+    return
+  }
 
+  const canvas = document.getElementById(`trim-waveform-${segmentId}`) as HTMLCanvasElement | null
+  if (!canvas) return
+
+  event.preventDefault()
+
+  const startRect = canvas.getBoundingClientRect()
+  const anchorMs = trimMsFromPointerX(event.clientX, startRect)
+
+  trimSelectionAnchorMs.value = anchorMs
+  trimStart.value = anchorMs
+  trimEnd.value = anchorMs
+  trimSelecting.value = true
   drawTrimWaveform(segmentId)
+
+  const onMove = (moveEvent: PointerEvent) => {
+    if (!trimSelecting.value) return
+    const rect = canvas.getBoundingClientRect()
+    const nextMs = trimMsFromPointerX(moveEvent.clientX, rect)
+
+    trimStart.value = Math.min(trimSelectionAnchorMs.value, nextMs)
+    trimEnd.value = Math.max(trimSelectionAnchorMs.value, nextMs)
+    drawTrimWaveform(segmentId)
+  }
+
+  const onUp = () => {
+    trimSelecting.value = false
+    trimSelectionArmed.value = false
+
+    if (!hasTrimSelection.value) {
+      trimStart.value = 0
+      trimEnd.value = 0
+      status.value = 'Selection is too short. Drag a wider deadspace section.'
+    }
+
+    drawTrimWaveform(segmentId)
+    document.removeEventListener('pointermove', onMove)
+    document.removeEventListener('pointerup', onUp)
+  }
+
+  document.addEventListener('pointermove', onMove)
+  document.addEventListener('pointerup', onUp)
 }
 
 async function previewTrim() {
   const segmentId = expandedTrim.value
   if (!segmentId || trimSegmentId.value !== segmentId) return
+  if (!hasTrimSelection.value) {
+    status.value = 'Select deadspace to preview'
+    return
+  }
 
   const context = getAudioContext()
-  if (!context || !trimDecodedBuffer.value) return
+  const decoded = trimDecodedBuffer.value
+  if (!context || !decoded) return
 
   if (context.state === 'suspended') {
     await context.resume()
   }
 
-  if (trimPreviewSource) {
-    try {
-      trimPreviewSource.stop()
-    } catch {
-      // no-op
-    }
-    trimPreviewSource.disconnect()
-    trimPreviewSource = null
+  const startFrame = Math.max(
+    0,
+    Math.min(
+      decoded.length,
+      Math.round((trimSelectionStart.value / 1000) * decoded.sampleRate),
+    ),
+  )
+  const endFrame = Math.max(
+    startFrame,
+    Math.min(
+      decoded.length,
+      Math.round((trimSelectionEnd.value / 1000) * decoded.sampleRate),
+    ),
+  )
+  const removedFrames = endFrame - startFrame
+  const nextLength = decoded.length - removedFrames
+  if (removedFrames <= 0 || nextLength < 1) {
+    status.value = 'Selected deadspace is not valid for preview'
+    return
   }
 
-  const durationMs = Math.max(MIN_TRIM_GAP_MS, trimEnd.value - trimStart.value)
+  const previewBuffer = context.createBuffer(
+    decoded.numberOfChannels,
+    nextLength,
+    decoded.sampleRate,
+  )
+  for (let channel = 0; channel < decoded.numberOfChannels; channel += 1) {
+    const sourceData = decoded.getChannelData(channel)
+    const targetData = previewBuffer.getChannelData(channel)
+    targetData.set(sourceData.subarray(0, startFrame), 0)
+    targetData.set(sourceData.subarray(endFrame), startFrame)
+  }
 
+  stopTrimPreview()
   const source = context.createBufferSource()
-  source.buffer = trimDecodedBuffer.value
+  source.buffer = previewBuffer
   source.playbackRate.value = playbackSpeed.value
   source.connect(context.destination)
-  source.start(0, trimStart.value / 1000, durationMs / 1000)
+  source.start(0)
 
   trimPreviewSource = source
   source.onended = () => {
@@ -2299,8 +2667,13 @@ async function applyTrim() {
   const segment = segments.value.find(item => item.id === segmentId)
   if (!segment) return
 
-  if (trimEnd.value - trimStart.value < MIN_TRIM_GAP_MS) {
-    status.value = 'Trim range is too short'
+  if (!hasTrimSelection.value) {
+    status.value = 'Select deadspace to remove'
+    return
+  }
+
+  if (trimAudioDuration.value - trimSelectionDuration.value < MIN_TRIM_GAP_MS) {
+    status.value = 'Selected deadspace is too large to remove'
     return
   }
 
@@ -2310,8 +2683,9 @@ async function applyTrim() {
     const payload = await $fetch<TrimResponse>(`${baseURL}/api/segments/${segment.id}/trim`, {
       method: 'POST',
       body: {
-        start_ms: trimStart.value,
-        end_ms: trimEnd.value,
+        start_ms: trimSelectionStart.value,
+        end_ms: trimSelectionEnd.value,
+        mode: 'remove',
       },
     })
 
@@ -2334,43 +2708,12 @@ async function applyTrim() {
       await fetchVariants(segment.id)
     }
 
-    status.value = 'Audio trimmed successfully'
+    status.value = 'Deadspace removed and saved'
   } catch (err: any) {
     status.value = err?.data?.detail || err?.message || 'Trim failed'
   } finally {
     trimApplying.value = false
   }
-}
-
-function onTrimPointerDown(event: PointerEvent, handle: TrimHandle, segmentId: number) {
-  event.preventDefault()
-  trimDragging.value = handle
-
-  const onMove = (moveEvent: PointerEvent) => {
-    const canvas = document.getElementById(`trim-waveform-${segmentId}`) as HTMLCanvasElement | null
-    if (!canvas) return
-
-    const rect = canvas.getBoundingClientRect()
-    const fraction = Math.max(0, Math.min(1, (moveEvent.clientX - rect.left) / rect.width))
-    const nextMs = Math.round(fraction * trimAudioDuration.value)
-
-    if (trimDragging.value === 'start') {
-      trimStart.value = Math.min(nextMs, trimEnd.value - MIN_TRIM_GAP_MS)
-    } else if (trimDragging.value === 'end') {
-      trimEnd.value = Math.max(nextMs, trimStart.value + MIN_TRIM_GAP_MS)
-    }
-
-    drawTrimWaveform(segmentId)
-  }
-
-  const onUp = () => {
-    trimDragging.value = null
-    document.removeEventListener('pointermove', onMove)
-    document.removeEventListener('pointerup', onUp)
-  }
-
-  document.addEventListener('pointermove', onMove)
-  document.addEventListener('pointerup', onUp)
 }
 
 function toggleTimeline() {
@@ -2421,11 +2764,21 @@ function isRelevantSegment(segmentId: number) {
   return segments.value.some(segment => segment.id === segmentId)
 }
 
+function markQueuedSegments(segmentIds: number[]) {
+  for (const segmentId of segmentIds) {
+    if (!isRelevantSegment(segmentId)) continue
+    const segment = segments.value.find(item => item.id === segmentId)
+    if (!segment || segment.status === 'generating') continue
+    queuedSegmentIds.add(segmentId)
+  }
+}
+
 async function handleWsMessage(message: any) {
   if (message.type === 'queued') {
     const queuedIds: number[] = message.segment_ids || []
     if (!queuedIds.some(id => isRelevantSegment(id))) return
 
+    markQueuedSegments(queuedIds)
     generating.value = true
     genTotal.value = queuedIds.length
     genIndex.value = 0
@@ -2436,6 +2789,7 @@ async function handleWsMessage(message: any) {
   if (message.type === 'segment_start') {
     if (!isRelevantSegment(message.segment_id)) return
 
+    queuedSegmentIds.delete(message.segment_id)
     generating.value = true
     genTotal.value = message.total || genTotal.value
     genIndex.value = message.index || 0
@@ -2453,6 +2807,7 @@ async function handleWsMessage(message: any) {
   if (message.type === 'segment_done') {
     if (!isRelevantSegment(message.segment_id)) return
 
+    queuedSegmentIds.delete(message.segment_id)
     genIndex.value = (message.index || 0) + 1
 
     if (message.segment) {
@@ -2474,6 +2829,7 @@ async function handleWsMessage(message: any) {
   if (message.type === 'segment_error') {
     if (!isRelevantSegment(message.segment_id)) return
 
+    queuedSegmentIds.delete(message.segment_id)
     genIndex.value = (message.index || 0) + 1
 
     const index = segments.value.findIndex(segment => segment.id === message.segment_id)
@@ -2520,6 +2876,7 @@ async function handleWsMessage(message: any) {
   if (message.type === 'queue_status' && !message.active_job_id && !message.queue_length) {
     generating.value = false
     cancelling.value = false
+    queuedSegmentIds.clear()
   }
 }
 
@@ -2552,17 +2909,13 @@ function resetWorkspaceState() {
 
   editingId.value = null
   editText.value = ''
+  resetSplitState()
 
   expandedVariants.value = null
   expandedTranscript.value = null
   expandedTrim.value = null
 
-  trimStart.value = 0
-  trimEnd.value = 0
-  trimWaveformData.value = null
-  trimAudioDuration.value = 1
-  trimSegmentId.value = null
-  trimDecodedBuffer.value = null
+  resetTrimWaveformState()
 
   transcribeAllProgress.value = null
 
@@ -2572,6 +2925,10 @@ function resetWorkspaceState() {
 
   status.value = ''
   error.value = null
+  queuedSegmentIds.clear()
+  collapsedSegmentIds.clear()
+  segmentStatusFilter.value = 'all'
+  doneTrimSuggestedOnly.value = false
 }
 
 watch(
@@ -2587,6 +2944,15 @@ watch(
     ])
   },
   { immediate: true },
+)
+
+watch(
+  () => segmentStatusFilter.value,
+  nextFilter => {
+    if (nextFilter !== 'done') {
+      doneTrimSuggestedOnly.value = false
+    }
+  },
 )
 
 watch(
@@ -2681,13 +3047,17 @@ watch(
   () => expandedTrim.value,
   segmentId => {
     if (segmentId === null) {
-      trimSegmentId.value = null
-      trimWaveformData.value = null
-      trimDecodedBuffer.value = null
+      resetTrimWaveformState()
       return
     }
 
-    nextTick(() => drawTrimWaveform(segmentId))
+    nextTick(() => {
+      if (trimSegmentId.value === segmentId && trimWaveformData.value) {
+        drawTrimWaveform(segmentId)
+      } else {
+        void loadTrimWaveform(segmentId)
+      }
+    })
   },
 )
 
@@ -2731,6 +3101,7 @@ onMounted(() => {
 onUnmounted(() => {
   if (wsReconnectTimer) clearTimeout(wsReconnectTimer)
   if (ws) ws.close()
+  resetTrimWaveformState()
 
   if (voiceDraft.value) {
     void discardVoiceDraft({ silent: true, skipConfirm: true })
@@ -2741,16 +3112,6 @@ onUnmounted(() => {
 
   if (import.meta.client) {
     document.removeEventListener('play', onAnyAudioPlay, true)
-  }
-
-  if (trimPreviewSource) {
-    try {
-      trimPreviewSource.stop()
-    } catch {
-      // no-op
-    }
-    trimPreviewSource.disconnect()
-    trimPreviewSource = null
   }
 
   if (audioContext) {
@@ -2796,6 +3157,8 @@ onUnmounted(() => {
           <span>{{ segments.length }} segments</span>
           <span>{{ doneCount }} done</span>
           <span>{{ pendingCount }} pending</span>
+          <span v-if="queuedCount">{{ queuedCount }} queued</span>
+          <span v-if="generatingCount">{{ generatingCount }} generating</span>
           <span v-if="errorCount">{{ errorCount }} failed</span>
           <span class="font-medium text-foreground">{{ totalDuration }}</span>
         </div>
@@ -2854,6 +3217,47 @@ onUnmounted(() => {
           >
             {{ confirmClear ? 'Confirm Clear' : 'Clear All' }}
           </Button>
+        </div>
+
+        <div class="flex flex-wrap items-center gap-2 rounded-md border bg-muted/20 p-2">
+          <label class="text-xs text-muted-foreground">Filter</label>
+          <select v-model="segmentStatusFilter" class="rounded border bg-background px-2 py-1 text-xs">
+            <option value="all">All</option>
+            <option value="pending">Pending</option>
+            <option value="queued">Queued</option>
+            <option value="generating">Generating</option>
+            <option value="done">Done</option>
+            <option value="error">Error</option>
+          </select>
+          <Button
+            v-if="segmentStatusFilter === 'done'"
+            size="sm"
+            :variant="doneTrimSuggestedOnly ? 'default' : 'outline'"
+            class="h-8"
+            :disabled="!trimSuggestedDoneCount && !doneTrimSuggestedOnly"
+            @click="doneTrimSuggestedOnly = !doneTrimSuggestedOnly"
+          >
+            Trim Suggested {{ trimSuggestedDoneCount ? `(${trimSuggestedDoneCount})` : '' }}
+          </Button>
+          <Button
+            size="sm"
+            variant="outline"
+            class="h-8"
+            :disabled="!hasExpandedFilteredSegments"
+            @click="collapseFilteredSegments"
+          >
+            Collapse All
+          </Button>
+          <Button
+            size="sm"
+            variant="outline"
+            class="h-8"
+            :disabled="!hasCollapsedFilteredSegments"
+            @click="expandFilteredSegments"
+          >
+            Expand All
+          </Button>
+          <span class="ml-auto text-xs text-muted-foreground">{{ filteredSegments.length }} shown</span>
         </div>
 
         <div class="grid gap-2 sm:grid-cols-2">
@@ -3382,7 +3786,7 @@ onUnmounted(() => {
       </CardContent>
     </Card>
 
-    <div v-if="loading" class="flex items-center justify-center py-8 text-sm text-muted-foreground">
+    <div v-if="loading && !segments.length" class="flex items-center justify-center py-8 text-sm text-muted-foreground">
       <Loader2 class="mr-2 h-4 w-4 animate-spin" />
       Loading narration segments...
     </div>
@@ -3392,7 +3796,14 @@ onUnmounted(() => {
     </div>
 
     <div v-else class="space-y-3">
-      <template v-for="segment in segments" :key="`segment-wrap-${segment.id}`">
+      <div
+        v-if="!filteredSegments.length"
+        class="rounded-md border border-dashed p-6 text-center text-sm text-muted-foreground"
+      >
+        No segments match this status filter.
+      </div>
+
+      <template v-for="segment in filteredSegments" :key="`segment-wrap-${segment.id}`">
         <div class="group relative -my-1">
           <button
             v-if="insertAtPosition !== segment.position"
@@ -3423,27 +3834,53 @@ onUnmounted(() => {
           </div>
         </div>
 
-        <Card>
-        <CardHeader class="pb-3">
-          <div class="flex flex-wrap items-start justify-between gap-2">
-            <div class="space-y-1">
+        <Card :class="isSegmentCollapsed(segment.id) ? 'gap-2 py-2' : ''">
+        <CardHeader
+          :class="isSegmentCollapsed(segment.id) ? 'cursor-pointer px-4 pb-1' : 'cursor-pointer pb-3'"
+          :title="isSegmentCollapsed(segment.id) ? 'Click to expand' : 'Click to collapse'"
+          @click="toggleSegmentCollapsed(segment.id)"
+        >
+          <div
+            class="flex flex-wrap justify-between gap-2"
+            :class="isSegmentCollapsed(segment.id) ? 'items-center' : 'items-start'"
+          >
+            <div :class="isSegmentCollapsed(segment.id) ? 'space-y-0.5' : 'space-y-1'">
               <div class="flex items-center gap-2">
                 <Badge variant="outline">#{{ segment.position }}</Badge>
-                <span class="rounded px-2 py-0.5 text-xs font-medium" :class="statusClass(segment.status)">
-                  {{ segment.status }}
+                <span class="rounded px-2 py-0.5 text-xs font-medium" :class="statusClass(segmentDisplayStatus(segment))">
+                  {{ segmentDisplayStatus(segment) }}
                 </span>
                 <Badge v-if="segment.status === 'done' && segmentNeedsTrim(segment)" variant="secondary" class="text-cyan-700 dark:text-cyan-300">
                   Trim suggested
                 </Badge>
               </div>
 
+              <p v-if="isSegmentCollapsed(segment.id)" class="max-w-3xl text-sm leading-snug text-muted-foreground">
+                {{ segmentPreviewText(segment.text) }}
+              </p>
+
               <div v-if="segment.error_message" class="flex items-center gap-1 text-xs text-red-600 dark:text-red-400">
                 <XCircle class="h-3 w-3" />
                 {{ segment.error_message }}
               </div>
+
+              <div
+                v-if="isSegmentCollapsed(segment.id) && segment.audio_path"
+                class="pt-1"
+                @click.stop
+                @pointerdown.stop
+              >
+                <audio
+                  :key="`segment-audio-inline-${segment.id}-${audioVersion[segment.id] || 0}`"
+                  :src="segmentAudioUrl(segment.id)"
+                  controls
+                  preload="none"
+                  class="w-full max-w-xl"
+                />
+              </div>
             </div>
 
-            <div class="flex items-center gap-2">
+            <div class="flex items-center gap-2" @click.stop>
               <select
                 :value="segment.service"
                 class="rounded border bg-background px-2 py-1 text-xs"
@@ -3459,11 +3896,14 @@ onUnmounted(() => {
               <Button size="sm" variant="outline" class="h-8 px-2" @click="moveSegment(segment.id, 1)">
                 ↓
               </Button>
+              <Button size="sm" variant="outline" class="h-8 px-2" @click="toggleSegmentCollapsed(segment.id)">
+                {{ isSegmentCollapsed(segment.id) ? 'Expand' : 'Collapse' }}
+              </Button>
             </div>
           </div>
         </CardHeader>
 
-        <CardContent class="space-y-3">
+        <CardContent v-if="!isSegmentCollapsed(segment.id)" class="space-y-3">
           <div v-if="editingId === segment.id" class="space-y-2">
             <Textarea v-model="editText" :rows="3" />
             <div class="flex items-center gap-2">
@@ -3482,6 +3922,14 @@ onUnmounted(() => {
           <div class="flex flex-wrap items-center gap-2">
             <Button size="sm" variant="outline" @click="startEdit(segment)">
               Edit
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              :disabled="generating"
+              @click="openSplitPreview(segment.id)"
+            >
+              {{ splitSegmentId === segment.id ? 'Hide Split' : 'Split' }}
             </Button>
             <Button size="sm" variant="outline" class="text-red-600" @click="deleteSegment(segment.id)">
               Delete
@@ -3503,7 +3951,7 @@ onUnmounted(() => {
               @click="toggleTrim(segment.id)"
             >
               <Scissors class="mr-1 h-3.5 w-3.5" />
-              {{ expandedTrim === segment.id ? 'Hide Trim' : 'Trim' }}
+              {{ expandedTrim === segment.id ? 'Hide Trim' : 'Trim Deadspace' }}
             </Button>
             <Button
               size="sm"
@@ -3523,13 +3971,71 @@ onUnmounted(() => {
             </Button>
           </div>
 
+          <div
+            v-if="splitSegmentId === segment.id"
+            class="space-y-3 rounded-md border border-indigo-200 bg-indigo-50/40 p-3 dark:border-indigo-900/50 dark:bg-indigo-900/10"
+          >
+            <div class="flex flex-wrap items-center gap-2">
+              <p class="text-sm font-medium text-indigo-700 dark:text-indigo-300">Split Segment</p>
+              <label class="text-xs text-muted-foreground">Target words</label>
+              <Input
+                v-model.number="splitTargetWords"
+                type="number"
+                class="h-8 w-24"
+                :min="MIN_SPLIT_TARGET_WORDS"
+                :max="MAX_SPLIT_TARGET_WORDS"
+                @change="refreshSplitPreview(segment.id)"
+              />
+              <Button
+                size="sm"
+                variant="outline"
+                :disabled="splitPreviewLoading || splitApplying"
+                @click="refreshSplitPreview(segment.id)"
+              >
+                {{ splitPreviewLoading ? 'Previewing...' : 'Refresh Preview' }}
+              </Button>
+              <Button
+                size="sm"
+                :disabled="splitPreviewLoading || splitApplying || !splitPreview?.can_split"
+                @click="applySegmentSplit(segment.id)"
+              >
+                {{ splitApplying ? 'Splitting...' : 'Confirm Split' }}
+              </Button>
+              <Button size="sm" variant="outline" @click="resetSplitState({ keepTarget: true })">
+                Cancel
+              </Button>
+            </div>
+
+            <p v-if="splitPreview" class="text-xs text-muted-foreground">
+              {{ splitPreview.groups.length }} groups previewed · target {{ splitPreview.target_words }} words ({{ splitPreview.min_words }}-{{ splitPreview.max_words }} ideal)
+            </p>
+            <p v-if="splitPreview && !splitPreview.can_split" class="text-xs text-amber-700 dark:text-amber-300">
+              This segment does not split into multiple sentence groups with the current settings.
+            </p>
+
+            <div v-if="splitPreview?.groups?.length" class="space-y-2">
+              <div
+                v-for="(group, groupIndex) in splitPreview.groups"
+                :key="`split-group-${segment.id}-${groupIndex}`"
+                class="rounded border bg-background/80 p-2"
+              >
+                <div class="mb-1 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+                  <Badge variant="outline">Segment {{ groupIndex + 1 }}</Badge>
+                  <span>{{ group.word_count }} words</span>
+                  <span>{{ group.sentence_count }} sentence{{ group.sentence_count === 1 ? '' : 's' }}</span>
+                </div>
+                <p class="text-sm leading-relaxed">{{ group.text }}</p>
+              </div>
+            </div>
+          </div>
+
           <Input
             v-model="regenText[segment.id]"
             placeholder="Optional regenerate text override"
           />
 
           <audio
-            v-if="segment.status === 'done' && segment.audio_path"
+            v-if="segment.audio_path"
             :key="`segment-audio-${segment.id}-${audioVersion[segment.id] || 0}`"
             :src="segmentAudioUrl(segment.id)"
             controls
@@ -3542,50 +4048,81 @@ onUnmounted(() => {
             class="space-y-3 rounded-md border border-cyan-200 bg-cyan-50/40 p-3 dark:border-cyan-900/50 dark:bg-cyan-900/10"
           >
             <div class="flex flex-wrap items-center gap-2">
-              <p class="text-sm font-medium text-cyan-700 dark:text-cyan-300">Trim Audio</p>
+              <p class="text-sm font-medium text-cyan-700 dark:text-cyan-300">Trim Deadspace</p>
               <span class="text-xs tabular-nums text-muted-foreground">{{ trimRangeLabel }}</span>
 
-              <Button size="sm" variant="outline" @click="autoSuggestTrim">
-                Auto
+              <Button
+                size="sm"
+                variant="outline"
+                :class="trimSelectionArmed ? 'border-rose-500 text-rose-700 dark:text-rose-300' : ''"
+                :disabled="trimWaveformLoading || !trimWaveformData || trimApplying"
+                @click="beginTrimSelection"
+              >
+                {{ trimSelectionArmed ? 'Drag on Waveform' : 'Select Deadspace' }}
               </Button>
-              <Button size="sm" variant="outline" @click="previewTrim">
-                Preview
+              <Button
+                size="sm"
+                variant="outline"
+                :disabled="trimWaveformLoading || !trimWaveformData || !hasTrimSelection"
+                @click="previewTrim"
+              >
+                Preview New Audio
               </Button>
-              <Button size="sm" :disabled="trimApplying" @click="applyTrim">
-                {{ trimApplying ? 'Applying...' : 'Apply Trim' }}
+              <Button
+                size="sm"
+                :disabled="trimApplying || trimWaveformLoading || !trimWaveformData || !hasTrimSelection"
+                @click="applyTrim"
+              >
+                {{ trimApplying ? 'Saving...' : 'Save' }}
+              </Button>
+              <Button
+                size="sm"
+                variant="outline"
+                :disabled="trimWaveformLoading || !hasTrimSelection"
+                @click="clearTrimSelection"
+              >
+                Clear
+              </Button>
+              <Button size="sm" variant="outline" :disabled="trimApplying" @click="cancelTrimDeadspace">
+                Cancel
+              </Button>
+              <Button
+                v-if="trimWaveformError"
+                size="sm"
+                variant="outline"
+                :disabled="trimWaveformLoading"
+                @click="loadTrimWaveform(segment.id)"
+              >
+                Retry Waveform
               </Button>
             </div>
+            <p v-if="trimWaveformLoading" class="text-xs text-muted-foreground">Loading waveform...</p>
+            <p v-else-if="trimWaveformError" class="text-xs text-amber-700 dark:text-amber-300">{{ trimWaveformError }}</p>
+            <p v-else class="text-xs text-muted-foreground">
+              {{ trimSelectionArmed
+                ? 'Click and drag on the waveform to highlight deadspace to remove.'
+                : 'Click Select Deadspace, drag to highlight the section to cut, then preview or save.' }}
+            </p>
 
             <div class="relative h-32 select-none">
               <canvas :id="`trim-waveform-${segment.id}`" class="h-full w-full rounded-md border bg-muted/50" />
 
               <div
-                class="trim-handle absolute bottom-0 top-0"
-                :style="{ left: `${(trimStart / trimAudioDuration) * 100}%` }"
-                @pointerdown="onTrimPointerDown($event, 'start', segment.id)"
+                v-if="trimWaveformData"
+                class="absolute inset-0 rounded-md touch-none"
+                :class="trimSelectionArmed ? 'cursor-crosshair' : 'cursor-default'"
+                @pointerdown="onTrimWaveformPointerDown($event, segment.id)"
               >
-                <div class="h-full w-1 rounded-full bg-primary" />
-                <div class="absolute -top-1 left-1/2 h-3 w-3 -translate-x-1/2 rounded-full border-2 border-background bg-primary" />
-                <div class="absolute -bottom-1 left-1/2 h-3 w-3 -translate-x-1/2 rounded-full border-2 border-background bg-primary" />
+                <span class="sr-only">Trim selection area</span>
               </div>
 
               <div
-                class="trim-handle absolute bottom-0 top-0"
-                :style="{ left: `${(trimEnd / trimAudioDuration) * 100}%` }"
-                @pointerdown="onTrimPointerDown($event, 'end', segment.id)"
-              >
-                <div class="h-full w-1 rounded-full bg-primary" />
-                <div class="absolute -top-1 left-1/2 h-3 w-3 -translate-x-1/2 rounded-full border-2 border-background bg-primary" />
-                <div class="absolute -bottom-1 left-1/2 h-3 w-3 -translate-x-1/2 rounded-full border-2 border-background bg-primary" />
-              </div>
-
-              <div
-                class="pointer-events-none absolute bottom-0 left-0 top-0 rounded-l-md bg-black/15 dark:bg-white/10"
-                :style="{ width: `${(trimStart / trimAudioDuration) * 100}%` }"
-              />
-              <div
-                class="pointer-events-none absolute bottom-0 right-0 top-0 rounded-r-md bg-black/15 dark:bg-white/10"
-                :style="{ width: `${100 - ((trimEnd / trimAudioDuration) * 100)}%` }"
+                v-if="hasTrimSelection"
+                class="pointer-events-none absolute bottom-0 top-0 rounded-md border border-rose-500/70 bg-rose-500/20"
+                :style="{
+                  left: `${(trimSelectionStart / trimAudioDuration) * 100}%`,
+                  width: `${(trimSelectionDuration / trimAudioDuration) * 100}%`,
+                }"
               />
             </div>
 
@@ -3594,9 +4131,9 @@ onUnmounted(() => {
                 v-for="(word, index) in transcriptions[segment.id].words"
                 :key="`trim-word-${segment.id}-${index}`"
                 class="rounded px-1.5 py-0.5 text-[11px]"
-                :class="word.start * 1000 >= trimStart && word.end * 1000 <= trimEnd
-                  ? 'bg-cyan-100 text-cyan-700 dark:bg-cyan-900/40 dark:text-cyan-300'
-                  : 'bg-muted text-muted-foreground line-through'"
+                :class="hasTrimSelection && word.start * 1000 >= trimSelectionStart && word.end * 1000 <= trimSelectionEnd
+                  ? 'bg-rose-100 text-rose-700 line-through dark:bg-rose-900/40 dark:text-rose-300'
+                  : 'bg-cyan-100 text-cyan-700 dark:bg-cyan-900/40 dark:text-cyan-300'"
               >
                 {{ word.word }}
               </span>

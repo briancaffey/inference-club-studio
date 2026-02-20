@@ -1,6 +1,7 @@
 """Audio post-processing utilities for narration export."""
 
 import io
+from typing import Literal
 
 from pydub import AudioSegment
 
@@ -61,10 +62,22 @@ def concatenate_segments(
     return combined
 
 
-def trim_audio(path: str, start_ms: int, end_ms: int) -> float:
+def trim_audio(
+    path: str,
+    start_ms: int,
+    end_ms: int,
+    mode: Literal["keep", "remove"] = "keep",
+) -> float:
     """Trim audio file in place. Returns new duration in seconds."""
     seg = AudioSegment.from_file(path)
-    trimmed = seg[start_ms:end_ms]
+    start_ms = max(0, min(len(seg), start_ms))
+    end_ms = max(start_ms, min(len(seg), end_ms))
+
+    if mode == "remove":
+        trimmed = seg[:start_ms] + seg[end_ms:]
+    else:
+        trimmed = seg[start_ms:end_ms]
+
     trimmed.export(path, format="wav")
     return len(trimmed) / 1000.0
 

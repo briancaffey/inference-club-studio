@@ -115,12 +115,22 @@ def split_into_chunks(
 # ---------------------------------------------------------------------------
 
 
+def _groq_reasoning_options(base_url: str) -> dict:
+    """Return Groq-compatible low-reasoning request options."""
+    if "groq.com" not in base_url.lower():
+        return {}
+    return {
+        "reasoning_effort": "low",
+        # Keep reasoning hidden in API responses.
+        "include_reasoning": False,
+    }
+
+
 async def _call_llm_chunk(client: httpx.AsyncClient, chunk: str) -> str:
     """Send a single chunk to the LLM for TTS cleanup. Returns raw content."""
     base_url = OPENAI_BASE_URL.rstrip("/")
 
     payload = {
-        "chat_template_kwargs": {"enable_thinking": False},
         "model": OPENAI_MODEL,
         "messages": [
             {"role": "system", "content": CHUNK_PROMPT},
@@ -128,6 +138,7 @@ async def _call_llm_chunk(client: httpx.AsyncClient, chunk: str) -> str:
         ],
         "max_tokens": LLM_MAX_TOKENS,
         "temperature": LLM_TEMPERATURE,
+        **_groq_reasoning_options(base_url),
     }
 
     resp = await client.post(
