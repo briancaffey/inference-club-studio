@@ -57,8 +57,18 @@ interface TrimResponse {
   transcription: NarrationTranscription | null
 }
 
+interface SegmentWaveformResponse {
+  segment_id: number
+  source: 'original' | 'cleaned'
+  audio_path: string
+  points: number
+  duration_ms: number
+  samples: number[]
+}
+
 type TrimHandle = 'start' | 'end'
 type SegmentStatusFilter = 'all' | 'pending' | 'queued' | 'generating' | 'done' | 'error'
+type SegmentSortMode = 'position' | 'recent'
 
 const props = defineProps<{
   projectId: string
@@ -170,13 +180,17 @@ const trimWaveformError = ref('')
 
 const generating = ref(false)
 const cancelling = ref(false)
+const studioVoiceCleaningAll = ref(false)
 const genIndex = ref(0)
 const genTotal = ref(0)
 const genEstimate = ref<number | null>(null)
 const queuedSegmentIds = reactive(new Set<number>())
 const collapsedSegmentIds = reactive(new Set<number>())
 const segmentStatusFilter = ref<SegmentStatusFilter>('all')
+const segmentSortMode = ref<SegmentSortMode>('position')
 const doneTrimSuggestedOnly = ref(false)
+const showFinalSegments = ref(true)
+const showNeedsReviewOnly = ref(false)
 
 let ws: WebSocket | null = null
 let wsReconnectTimer: ReturnType<typeof setTimeout> | null = null
@@ -206,6 +220,17 @@ const queuedCount = computed(() => segments.value.filter(segment => segmentDispl
 const generatingCount = computed(() => segments.value.filter(segment => segmentDisplayStatus(segment) === 'generating').length)
 const doneCount = computed(() => segments.value.filter(segment => segmentDisplayStatus(segment) === 'done').length)
 const errorCount = computed(() => segments.value.filter(segment => segmentDisplayStatus(segment) === 'error').length)
+const studioVoiceCleanedCount = computed(() => (
+  segments.value.filter(segment => !!segment.studio_voice_audio_path).length
+))
+const studioVoicePendingCount = computed(() => (
+  segments.value.filter(segment => !!segment.audio_path && !segment.studio_voice_audio_path).length
+))
+const studioVoiceCleanAllLabel = computed(() => {
+  if (studioVoiceCleaningAll.value) return 'Queueing Studio Voice...'
+  if (!studioVoicePendingCount.value) return 'Clean All (Studio Voice)'
+  return `Clean All (Studio Voice) ${studioVoicePendingCount.value}`
+})
 const trimSuggestedDoneCount = computed(() => (
   segments.value.filter(segment => segmentDisplayStatus(segment) === 'done' && segmentNeedsTrim(segment)).length
 ))
@@ -214,11 +239,22 @@ const filteredSegments = computed(() => {
     ? segments.value
     : segments.value.filter(segment => segmentDisplayStatus(segment) === segmentStatusFilter.value)
 
+  const finalFiltered = showFinalSegments.value
+    ? statusFiltered
+    : statusFiltered.filter(segment => !segment.is_final)
+
+  const reviewFiltered = showNeedsReviewOnly.value
+    ? finalFiltered.filter(segment => segment.needs_review)
+    : finalFiltered
+
   if (segmentStatusFilter.value === 'done' && doneTrimSuggestedOnly.value) {
-    return statusFiltered.filter(segment => segmentNeedsTrim(segment))
+    return sortSegments(
+      reviewFiltered.filter(segment => segmentNeedsTrim(segment)),
+      segmentSortMode.value,
+    )
   }
 
-  return statusFiltered
+  return sortSegments(reviewFiltered, segmentSortMode.value)
 })
 const hasCollapsedFilteredSegments = computed(() => (
   filteredSegments.value.some(segment => collapsedSegmentIds.has(segment.id))
@@ -257,7 +293,9 @@ const timelineCursorPercent = computed(() => {
   const percent = ((offset + timelineCurrentTime.value) / total) * 100
   return Math.max(0, Math.min(100, percent))
 })
-const timelineHasDoneSegments = computed(() => segments.value.some(segment => segment.status === 'done' && !!segment.audio_path))
+const timelineHasDoneSegments = computed(() => (
+  segments.value.some(segment => segment.status === 'done' && timelineSegmentHasAudio(segment))
+))
 const autoTimelineZoom = computed(() => {
   const count = segments.value.length
   if (!count) return 1
@@ -372,6 +410,20 @@ function statusClass(segmentStatus: string) {
   return 'bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-300'
 }
 
+function studioVoiceStatusLabel(status: string) {
+  if (status === 'cleaned') return 'Cleaned'
+  if (status === 'unavailable') return 'Unavailable'
+  if (status === 'error') return 'Error'
+  return 'Not cleaned'
+}
+
+function studioVoiceStatusClass(status: string) {
+  if (status === 'cleaned') return 'bg-emerald-100 text-emerald-800 dark:bg-emerald-900/40 dark:text-emerald-300'
+  if (status === 'unavailable') return 'bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-300'
+  if (status === 'error') return 'bg-red-100 text-red-800 dark:bg-red-900/40 dark:text-red-300'
+  return 'bg-slate-100 text-slate-700 dark:bg-slate-900/40 dark:text-slate-300'
+}
+
 function estimateDurationFromText(text: string) {
   if (!text.trim()) return 0
   const words = text.trim().split(/\s+/).length
@@ -382,7 +434,20 @@ function segmentDurationSeconds(segment: NarrationSegment) {
   return segment.duration_seconds || estimateDurationFromText(segment.text)
 }
 
-function sortSegments(list: NarrationSegment[]) {
+function segmentGeneratedAtMs(segment: NarrationSegment) {
+  if (!segment.last_generated_at) return 0
+  const timestamp = Date.parse(segment.last_generated_at)
+  return Number.isFinite(timestamp) ? timestamp : 0
+}
+
+function sortSegments(list: NarrationSegment[], mode: SegmentSortMode = 'position') {
+  if (mode === 'recent') {
+    return [...list].sort((a, b) => {
+      const diff = segmentGeneratedAtMs(b) - segmentGeneratedAtMs(a)
+      if (diff !== 0) return diff
+      return a.position - b.position
+    })
+  }
   return [...list].sort((a, b) => a.position - b.position)
 }
 
@@ -400,6 +465,8 @@ function invalidateSegmentAudio(segmentId: number) {
 function segmentAudioChanged(previous: NarrationSegment, next: NarrationSegment) {
   return (
     previous.audio_path !== next.audio_path
+    || previous.studio_voice_audio_path !== next.studio_voice_audio_path
+    || previous.studio_voice_status !== next.studio_voice_status
     || previous.duration_seconds !== next.duration_seconds
     || previous.selected_variant_id !== next.selected_variant_id
     || previous.status !== next.status
@@ -466,7 +533,7 @@ function setSegments(list: NarrationSegment[]) {
       invalidateSegmentAudio(segment.id)
       delete transcriptions[segment.id]
     }
-    if (segment.status !== 'done' || !segment.audio_path) {
+    if (segment.status !== 'done' || !timelineSegmentHasAudio(segment)) {
       clearWaveform(segment.id)
       delete transcriptions[segment.id]
     }
@@ -485,7 +552,7 @@ function setSegments(list: NarrationSegment[]) {
   if (showTimeline.value) {
     nextTick(() => {
       for (const segment of segments.value) {
-        if (segment.status === 'done' && segment.audio_path) {
+        if (segment.status === 'done' && timelineSegmentHasAudio(segment)) {
           void loadWaveform(segment.id)
         } else {
           drawWaveform(segment.id)
@@ -510,7 +577,7 @@ function updateSegmentInPlace(segment: NarrationSegment) {
     delete transcriptions[segment.id]
   }
 
-  if (showTimeline.value && segment.status === 'done' && segment.audio_path) {
+  if (showTimeline.value && segment.status === 'done' && timelineSegmentHasAudio(segment)) {
     void loadWaveform(segment.id, { force: audioChanged })
   }
 }
@@ -519,8 +586,35 @@ function segmentAudioUrl(segmentId: number) {
   return `${baseURL}/api/segments/${segmentId}/audio?v=${audioVersion[segmentId] || 0}`
 }
 
+function segmentCleanedAudioUrl(segmentId: number) {
+  return `${baseURL}/api/segments/${segmentId}/audio/cleaned?v=${audioVersion[segmentId] || 0}`
+}
+
+function timelineSegmentHasAudio(segment: NarrationSegment) {
+  return !!segment.studio_voice_audio_path || !!segment.audio_path
+}
+
+function segmentHasTrimmableAudio(segment: NarrationSegment) {
+  if (!segment.audio_path) return false
+  return segment.status === 'done' || segment.status === 'error'
+}
+
+function timelineAudioUrl(
+  segment: NarrationSegment,
+  preferredSource: 'cleaned' | 'original' = 'cleaned',
+) {
+  if (preferredSource === 'cleaned' && segment.studio_voice_audio_path) {
+    return segmentCleanedAudioUrl(segment.id)
+  }
+  return segmentAudioUrl(segment.id)
+}
+
 function variantAudioUrl(variantId: number) {
   return `${baseURL}/api/variants/${variantId}/audio`
+}
+
+function variantCleanedAudioUrl(variantId: number) {
+  return `${baseURL}/api/variants/${variantId}/audio/cleaned`
 }
 
 function voiceSampleAudioUrl(sampleId: number) {
@@ -774,13 +868,20 @@ function applyCanvasResolution(canvas: HTMLCanvasElement) {
   return { context, width: rect.width, height: rect.height }
 }
 
-async function decodeSegmentAudio(segmentId: number, expectedVersion: number) {
+async function decodeSegmentAudio(
+  segmentId: number,
+  expectedVersion: number,
+  source: 'original' | 'cleaned' = 'original',
+) {
   if (!import.meta.client) return null
 
   const context = getAudioContext()
   if (!context) return null
 
-  const response = await fetch(`${baseURL}/api/segments/${segmentId}/audio?v=${expectedVersion}`)
+  const audioUrl = source === 'cleaned'
+    ? `${baseURL}/api/segments/${segmentId}/audio/cleaned?v=${expectedVersion}`
+    : `${baseURL}/api/segments/${segmentId}/audio?v=${expectedVersion}`
+  const response = await fetch(audioUrl)
   if (!response.ok) {
     throw new Error(`Audio fetch failed (${response.status})`)
   }
@@ -788,6 +889,19 @@ async function decodeSegmentAudio(segmentId: number, expectedVersion: number) {
   const bytes = await response.arrayBuffer()
   if ((audioVersion[segmentId] || 0) !== expectedVersion) return null
   return context.decodeAudioData(bytes.slice(0))
+}
+
+async function fetchSegmentWaveform(
+  segmentId: number,
+  points: number,
+  source: 'original' | 'cleaned' = 'original',
+) {
+  return await $fetch<SegmentWaveformResponse>(`${baseURL}/api/segments/${segmentId}/waveform`, {
+    query: {
+      points,
+      source,
+    },
+  })
 }
 
 async function loadVoiceDraftWaveform() {
@@ -938,7 +1052,8 @@ function getActiveWordIdx(segmentId: number) {
 
 async function loadWaveform(segmentId: number, options: WaveformLoadOptions = {}) {
   const segment = segments.value.find(item => item.id === segmentId)
-  if (!segment || segment.status !== 'done' || !segment.audio_path) return
+  if (!segment || segment.status !== 'done') return
+  if (!timelineSegmentHasAudio(segment)) return
 
   if (!options.force && waveformData[segmentId]) {
     drawWaveform(segmentId)
@@ -951,12 +1066,51 @@ async function loadWaveform(segmentId: number, options: WaveformLoadOptions = {}
   const expectedVersion = audioVersion[segmentId] || 0
 
   try {
-    const decoded = await decodeSegmentAudio(segmentId, expectedVersion)
-    if (!decoded) return
-    if ((audioVersion[segmentId] || 0) !== expectedVersion) return
+    const preferredSource: 'cleaned' | 'original' = segment.studio_voice_audio_path ? 'cleaned' : 'original'
+    const fallbackSource: 'cleaned' | 'original' = preferredSource === 'cleaned' ? 'original' : 'cleaned'
+    const hasFallbackAudio = fallbackSource === 'cleaned'
+      ? !!segment.studio_voice_audio_path
+      : !!segment.audio_path
 
-    const samples = buildWaveformSamples(decoded.getChannelData(0), 200)
-    const durationMs = Math.max(1, Math.round(decoded.duration * 1000))
+    let decoded: AudioBuffer | null = null
+    try {
+      decoded = await decodeSegmentAudio(segmentId, expectedVersion, preferredSource)
+    } catch (err) {
+      console.error('Failed to decode browser waveform for segment', segmentId, err)
+      if (hasFallbackAudio) {
+        try {
+          decoded = await decodeSegmentAudio(segmentId, expectedVersion, fallbackSource)
+        } catch (fallbackErr) {
+          console.error('Failed fallback decode for segment', segmentId, fallbackErr)
+        }
+      }
+    }
+
+    if (decoded && (audioVersion[segmentId] || 0) === expectedVersion) {
+      const samples = buildWaveformSamples(decoded.getChannelData(0), 200)
+      const durationMs = Math.max(1, Math.round(decoded.duration * 1000))
+      waveformData[segmentId] = samples
+      waveformMeta[segmentId] = {
+        durationMs,
+        speechBounds: detectSpeechBounds(samples, durationMs),
+      }
+      await nextTick()
+      drawWaveform(segmentId)
+      return
+    }
+
+    let serverWaveform: SegmentWaveformResponse | null = null
+    try {
+      serverWaveform = await fetchSegmentWaveform(segmentId, 200, preferredSource)
+    } catch {
+      if (hasFallbackAudio) {
+        serverWaveform = await fetchSegmentWaveform(segmentId, 200, fallbackSource)
+      }
+    }
+
+    if (!serverWaveform || (audioVersion[segmentId] || 0) !== expectedVersion) return
+    const samples = Float32Array.from(serverWaveform.samples)
+    const durationMs = Math.max(1, Math.round(serverWaveform.duration_ms))
     waveformData[segmentId] = samples
     waveformMeta[segmentId] = {
       durationMs,
@@ -1068,7 +1222,7 @@ async function openTimelinePanel() {
   setupTimelineResizeObserver()
 
   for (const segment of segments.value) {
-    if (segment.status === 'done' && segment.audio_path) {
+    if (segment.status === 'done' && timelineSegmentHasAudio(segment)) {
       void loadWaveform(segment.id)
     }
   }
@@ -1181,7 +1335,7 @@ function playTimelineSegment(startIndex: number) {
   let index = startIndex
   while (index < segments.value.length) {
     const segment = segments.value[index]
-    if (segment.status === 'done' && segment.audio_path) {
+    if (segment.status === 'done' && timelineSegmentHasAudio(segment)) {
       break
     }
     index += 1
@@ -1197,9 +1351,21 @@ function playTimelineSegment(startIndex: number) {
 
   const segment = segments.value[index]
   const player = timelineAudioPlayer.value
-  player.src = segmentAudioUrl(segment.id)
+  const preferredSource: 'cleaned' | 'original' = segment.studio_voice_audio_path ? 'cleaned' : 'original'
+  const hasOriginalFallback = preferredSource === 'cleaned' && !!segment.audio_path
+
+  player.src = timelineAudioUrl(segment, preferredSource)
   player.playbackRate = playbackSpeed.value
   player.play().catch(() => {
+    if (hasOriginalFallback) {
+      player.src = timelineAudioUrl(segment, 'original')
+      player.playbackRate = playbackSpeed.value
+      player.play().catch(() => {
+        timelineIsPlaying.value = false
+        cancelTimelineAnimationLoop()
+      })
+      return
+    }
     timelineIsPlaying.value = false
     cancelTimelineAnimationLoop()
   })
@@ -1883,6 +2049,43 @@ async function regenerate(segmentId: number) {
   }
 }
 
+async function updateSegmentFlags(segmentId: number, flags: { is_final?: boolean; needs_review?: boolean }) {
+  const updated = await $fetch<NarrationSegment>(`${baseURL}/api/segments/${segmentId}/flags`, {
+    method: 'PATCH',
+    body: flags,
+  })
+  updateSegmentInPlace(updated)
+}
+
+async function toggleFinal(segment: NarrationSegment) {
+  try {
+    await updateSegmentFlags(segment.id, { is_final: !segment.is_final })
+  } catch (err: any) {
+    status.value = err?.data?.detail || 'Failed to update final flag'
+  }
+}
+
+async function clearNeedsReview(segment: NarrationSegment) {
+  if (!segment.needs_review) return
+  try {
+    await updateSegmentFlags(segment.id, { needs_review: false })
+  } catch (err: any) {
+    status.value = err?.data?.detail || 'Failed to update needs review flag'
+  }
+}
+
+async function markSegmentDone(segment: NarrationSegment) {
+  try {
+    const updated = await $fetch<NarrationSegment>(`${baseURL}/api/segments/${segment.id}/mark-done`, {
+      method: 'POST',
+    })
+    updateSegmentInPlace(updated)
+    status.value = `Segment ${segment.position} marked done`
+  } catch (err: any) {
+    status.value = err?.data?.detail || 'Failed to mark segment done'
+  }
+}
+
 async function generateAll() {
   const pending = segments.value.filter(segment => segment.status !== 'done').map(segment => segment.id)
   if (!pending.length) return
@@ -1895,6 +2098,32 @@ async function generateAll() {
     }
   } catch (err: any) {
     status.value = err?.data?.detail || 'Generate-all request failed'
+  }
+}
+
+async function cleanAllWithStudioVoice() {
+  if (studioVoiceCleaningAll.value) return
+
+  studioVoiceCleaningAll.value = true
+  try {
+    const response = await $fetch<{ message?: string; queued: number }>(
+      `${baseURL}/api/projects/${props.projectId}/studio-voice/clean-all`,
+      { method: 'POST' },
+    )
+
+    if (response.queued > 0) {
+      status.value = `Queued Studio Voice cleaning for ${response.queued} audio item${response.queued === 1 ? '' : 's'}`
+      setTimeout(() => {
+        void fetchSegments()
+      }, 1800)
+    } else {
+      status.value = response.message || 'All eligible audio is already Studio Voice cleaned'
+      await fetchSegments()
+    }
+  } catch (err: any) {
+    status.value = err?.data?.detail || 'Studio Voice clean-all request failed'
+  } finally {
+    studioVoiceCleaningAll.value = false
   }
 }
 
@@ -2309,7 +2538,7 @@ function seekToWord(segmentId: number, startSeconds: number) {
 }
 
 function segmentNeedsTrim(segment: NarrationSegment) {
-  if (segment.status !== 'done') return false
+  if (!segmentHasTrimmableAudio(segment)) return false
 
   const transcription = transcriptions[segment.id]
   if (!transcription?.words?.length || !segment.duration_seconds) return false
@@ -2338,7 +2567,7 @@ function toggleTrim(segmentId: number) {
 
 async function loadTrimWaveform(segmentId: number) {
   const segment = segments.value.find(item => item.id === segmentId)
-  if (!segment || segment.status !== 'done' || !segment.audio_path) return
+  if (!segment || !segmentHasTrimmableAudio(segment)) return
 
   const requestId = ++trimWaveformRequestId
   trimWaveformLoading.value = true
@@ -2369,14 +2598,33 @@ async function loadTrimWaveform(segmentId: number) {
     }
 
     if (!decoded) {
-      trimWaveformData.value = null
-      trimDecodedBuffer.value = null
-      resetTrimSelectionState()
-      trimWaveformError.value = 'Could not load waveform. Try again.'
-      if (lastError) {
-        console.error('Failed to load trim waveform', lastError)
+      try {
+        const serverWaveform = await fetchSegmentWaveform(segmentId, 520, 'original')
+        if (requestId !== trimWaveformRequestId || expandedTrim.value !== segmentId) {
+          return
+        }
+
+        trimSegmentId.value = segmentId
+        trimDecodedBuffer.value = null
+        trimAudioDuration.value = Math.max(1, Math.round(serverWaveform.duration_ms))
+        trimWaveformData.value = Float32Array.from(serverWaveform.samples)
+
+        resetTrimSelectionState()
+        await nextTick()
+        drawTrimWaveform(segmentId)
+        trimWaveformError.value = ''
+        return
+      } catch (serverErr) {
+        trimWaveformData.value = null
+        trimDecodedBuffer.value = null
+        resetTrimSelectionState()
+        trimWaveformError.value = 'Could not load waveform. Try again.'
+        if (lastError) {
+          console.error('Failed to load trim waveform', lastError)
+        }
+        console.error('Server waveform fallback failed', serverErr)
+        return
       }
-      return
     }
 
     trimSegmentId.value = segmentId
@@ -2396,6 +2644,36 @@ async function loadTrimWaveform(segmentId: number) {
     resetTrimSelectionState()
     trimWaveformError.value = 'Could not load waveform. Try again.'
     console.error('Failed to load trim waveform', err)
+  } finally {
+    if (requestId === trimWaveformRequestId) {
+      trimWaveformLoading.value = false
+    }
+  }
+}
+
+async function regenerateTrimWaveform(segmentId: number) {
+  const segment = segments.value.find(item => item.id === segmentId)
+  if (!segment || !segmentHasTrimmableAudio(segment)) return
+
+  const requestId = ++trimWaveformRequestId
+  trimWaveformLoading.value = true
+  trimWaveformError.value = ''
+
+  try {
+    const serverWaveform = await fetchSegmentWaveform(segmentId, 520, 'original')
+    if (requestId !== trimWaveformRequestId || expandedTrim.value !== segmentId) return
+
+    trimSegmentId.value = segmentId
+    trimDecodedBuffer.value = null
+    trimAudioDuration.value = Math.max(1, Math.round(serverWaveform.duration_ms))
+    trimWaveformData.value = Float32Array.from(serverWaveform.samples)
+    resetTrimSelectionState()
+
+    await nextTick()
+    drawTrimWaveform(segmentId)
+    status.value = 'Waveform regenerated from source audio'
+  } catch (err: any) {
+    trimWaveformError.value = err?.data?.detail || 'Could not regenerate waveform'
   } finally {
     if (requestId === trimWaveformRequestId) {
       trimWaveformLoading.value = false
@@ -2832,12 +3110,16 @@ async function handleWsMessage(message: any) {
     queuedSegmentIds.delete(message.segment_id)
     genIndex.value = (message.index || 0) + 1
 
-    const index = segments.value.findIndex(segment => segment.id === message.segment_id)
-    if (index !== -1) {
-      segments.value[index] = {
-        ...segments.value[index],
-        status: 'error',
-        error_message: message.error || 'Generation failed',
+    if (message.segment) {
+      updateSegmentInPlace(message.segment as NarrationSegment)
+    } else {
+      const index = segments.value.findIndex(segment => segment.id === message.segment_id)
+      if (index !== -1) {
+        segments.value[index] = {
+          ...segments.value[index],
+          status: 'error',
+          error_message: message.error || 'Generation failed',
+        }
       }
     }
 
@@ -2926,9 +3208,13 @@ function resetWorkspaceState() {
   status.value = ''
   error.value = null
   queuedSegmentIds.clear()
+  studioVoiceCleaningAll.value = false
   collapsedSegmentIds.clear()
   segmentStatusFilter.value = 'all'
+  segmentSortMode.value = 'position'
   doneTrimSuggestedOnly.value = false
+  showFinalSegments.value = true
+  showNeedsReviewOnly.value = false
 }
 
 watch(
@@ -3157,6 +3443,8 @@ onUnmounted(() => {
           <span>{{ segments.length }} segments</span>
           <span>{{ doneCount }} done</span>
           <span>{{ pendingCount }} pending</span>
+          <span>{{ studioVoiceCleanedCount }} studio voice cleaned</span>
+          <span v-if="studioVoicePendingCount">{{ studioVoicePendingCount }} studio voice pending</span>
           <span v-if="queuedCount">{{ queuedCount }} queued</span>
           <span v-if="generatingCount">{{ generatingCount }} generating</span>
           <span v-if="errorCount">{{ errorCount }} failed</span>
@@ -3206,6 +3494,14 @@ onUnmounted(() => {
           <Button size="sm" variant="outline" :disabled="!hasAudio || !!transcribeAllProgress" @click="transcribeAll">
             {{ transcribeAllProgress ? `Transcribing ${transcribeAllProgress.done}/${transcribeAllProgress.total}` : 'Transcribe All' }}
           </Button>
+          <Button
+            size="sm"
+            variant="outline"
+            :disabled="!studioVoicePendingCount || studioVoiceCleaningAll || generating"
+            @click="cleanAllWithStudioVoice"
+          >
+            {{ studioVoiceCleanAllLabel }}
+          </Button>
 
           <Button
             size="sm"
@@ -3229,6 +3525,27 @@ onUnmounted(() => {
             <option value="done">Done</option>
             <option value="error">Error</option>
           </select>
+          <label class="ml-1 text-xs text-muted-foreground">Sort</label>
+          <select v-model="segmentSortMode" class="rounded border bg-background px-2 py-1 text-xs">
+            <option value="position">Segment Order</option>
+            <option value="recent">Recently Generated</option>
+          </select>
+          <Button
+            size="sm"
+            :variant="showFinalSegments ? 'default' : 'outline'"
+            class="h-8"
+            @click="showFinalSegments = !showFinalSegments"
+          >
+            Show Final
+          </Button>
+          <Button
+            size="sm"
+            :variant="showNeedsReviewOnly ? 'default' : 'outline'"
+            class="h-8"
+            @click="showNeedsReviewOnly = !showNeedsReviewOnly"
+          >
+            Show Needs Review
+          </Button>
           <Button
             v-if="segmentStatusFilter === 'done'"
             size="sm"
@@ -3800,7 +4117,7 @@ onUnmounted(() => {
         v-if="!filteredSegments.length"
         class="rounded-md border border-dashed p-6 text-center text-sm text-muted-foreground"
       >
-        No segments match this status filter.
+        No segments match the current filters.
       </div>
 
       <template v-for="segment in filteredSegments" :key="`segment-wrap-${segment.id}`">
@@ -3850,6 +4167,27 @@ onUnmounted(() => {
                 <span class="rounded px-2 py-0.5 text-xs font-medium" :class="statusClass(segmentDisplayStatus(segment))">
                   {{ segmentDisplayStatus(segment) }}
                 </span>
+                <Badge
+                  v-if="segment.is_final"
+                  variant="secondary"
+                  class="bg-emerald-100 text-emerald-800 dark:bg-emerald-900/40 dark:text-emerald-300"
+                >
+                  Final
+                </Badge>
+                <Badge
+                  v-if="segment.needs_review"
+                  variant="secondary"
+                  class="bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-300"
+                >
+                  Needs Review
+                </Badge>
+                <span
+                  v-if="segment.audio_path"
+                  class="rounded px-2 py-0.5 text-xs font-medium"
+                  :class="studioVoiceStatusClass(segment.studio_voice_status)"
+                >
+                  Studio Voice: {{ studioVoiceStatusLabel(segment.studio_voice_status) }}
+                </span>
                 <Badge v-if="segment.status === 'done' && segmentNeedsTrim(segment)" variant="secondary" class="text-cyan-700 dark:text-cyan-300">
                   Trim suggested
                 </Badge>
@@ -3862,6 +4200,13 @@ onUnmounted(() => {
               <div v-if="segment.error_message" class="flex items-center gap-1 text-xs text-red-600 dark:text-red-400">
                 <XCircle class="h-3 w-3" />
                 {{ segment.error_message }}
+              </div>
+              <div
+                v-if="segment.studio_voice_error_message"
+                class="flex items-center gap-1 text-xs text-amber-700 dark:text-amber-300"
+              >
+                <AlertCircle class="h-3 w-3" />
+                {{ segment.studio_voice_error_message }}
               </div>
 
               <div
@@ -3940,11 +4285,35 @@ onUnmounted(() => {
             <Button size="sm" variant="outline" @click="regenerate(segment.id)">
               Regenerate
             </Button>
+            <Button
+              v-if="segment.status === 'error'"
+              size="sm"
+              variant="outline"
+              :disabled="!segment.audio_path"
+              @click="markSegmentDone(segment)"
+            >
+              Mark Done
+            </Button>
+            <Button
+              size="sm"
+              :variant="segment.is_final ? 'default' : 'outline'"
+              @click="toggleFinal(segment)"
+            >
+              {{ segment.is_final ? 'Final' : 'Mark Final' }}
+            </Button>
+            <Button
+              size="sm"
+              :variant="segment.needs_review ? 'default' : 'outline'"
+              :disabled="!segment.needs_review"
+              @click="clearNeedsReview(segment)"
+            >
+              Needs Review
+            </Button>
             <Button size="sm" variant="outline" @click="toggleVariants(segment.id)">
               Variants
             </Button>
             <Button
-              v-if="segment.status === 'done' && segment.audio_path"
+              v-if="segmentHasTrimmableAudio(segment)"
               size="sm"
               variant="outline"
               :class="expandedTrim === segment.id ? 'border-cyan-500 text-cyan-700 dark:text-cyan-300' : ''"
@@ -4034,14 +4403,28 @@ onUnmounted(() => {
             placeholder="Optional regenerate text override"
           />
 
-          <audio
-            v-if="segment.audio_path"
-            :key="`segment-audio-${segment.id}-${audioVersion[segment.id] || 0}`"
-            :src="segmentAudioUrl(segment.id)"
-            controls
-            preload="none"
-            class="w-full"
-          />
+          <div v-if="segment.audio_path" class="space-y-2">
+            <div class="space-y-1">
+              <p class="text-xs font-medium text-muted-foreground">Original</p>
+              <audio
+                :key="`segment-audio-${segment.id}-${audioVersion[segment.id] || 0}`"
+                :src="segmentAudioUrl(segment.id)"
+                controls
+                preload="none"
+                class="w-full"
+              />
+            </div>
+            <div v-if="segment.studio_voice_audio_path" class="space-y-1">
+              <p class="text-xs font-medium text-emerald-700 dark:text-emerald-300">Studio Voice</p>
+              <audio
+                :key="`segment-audio-cleaned-${segment.id}-${audioVersion[segment.id] || 0}`"
+                :src="segmentCleanedAudioUrl(segment.id)"
+                controls
+                preload="none"
+                class="w-full"
+              />
+            </div>
+          </div>
 
           <div
             v-if="expandedTrim === segment.id"
@@ -4063,7 +4446,7 @@ onUnmounted(() => {
               <Button
                 size="sm"
                 variant="outline"
-                :disabled="trimWaveformLoading || !trimWaveformData || !hasTrimSelection"
+                :disabled="trimWaveformLoading || !trimWaveformData || !hasTrimSelection || !trimDecodedBuffer"
                 @click="previewTrim"
               >
                 Preview New Audio
@@ -4087,6 +4470,14 @@ onUnmounted(() => {
                 Cancel
               </Button>
               <Button
+                size="sm"
+                variant="outline"
+                :disabled="trimWaveformLoading || trimApplying"
+                @click="regenerateTrimWaveform(segment.id)"
+              >
+                Regenerate Waveform
+              </Button>
+              <Button
                 v-if="trimWaveformError"
                 size="sm"
                 variant="outline"
@@ -4098,6 +4489,9 @@ onUnmounted(() => {
             </div>
             <p v-if="trimWaveformLoading" class="text-xs text-muted-foreground">Loading waveform...</p>
             <p v-else-if="trimWaveformError" class="text-xs text-amber-700 dark:text-amber-300">{{ trimWaveformError }}</p>
+            <p v-else-if="trimWaveformData && !trimDecodedBuffer" class="text-xs text-muted-foreground">
+              Waveform loaded in server mode. Preview is unavailable, but you can still save trims.
+            </p>
             <p v-else class="text-xs text-muted-foreground">
               {{ trimSelectionArmed
                 ? 'Click and drag on the waveform to highlight deadspace to remove.'
@@ -4155,7 +4549,7 @@ onUnmounted(() => {
                 class="rounded border bg-background p-2"
               >
                 <div class="mb-1 flex items-center justify-between gap-2 text-xs">
-                  <span>#{{ variant.id }} · {{ variant.service }}</span>
+                  <span>#{{ variant.id }} · {{ variant.service }} · Studio Voice: {{ studioVoiceStatusLabel(variant.studio_voice_status) }}</span>
                   <div class="flex items-center gap-2">
                     <Button size="sm" variant="outline" class="h-7 px-2" @click="selectVariant(segment.id, variant.id)">
                       Select
@@ -4165,7 +4559,17 @@ onUnmounted(() => {
                     </Button>
                   </div>
                 </div>
-                <audio :src="variantAudioUrl(variant.id)" controls preload="none" class="w-full" />
+                <p v-if="variant.studio_voice_error_message" class="mb-1 text-[11px] text-amber-700 dark:text-amber-300">
+                  {{ variant.studio_voice_error_message }}
+                </p>
+                <div class="space-y-1">
+                  <p class="text-[11px] font-medium text-muted-foreground">Original</p>
+                  <audio :src="variantAudioUrl(variant.id)" controls preload="none" class="w-full" />
+                </div>
+                <div v-if="variant.studio_voice_audio_path" class="mt-2 space-y-1">
+                  <p class="text-[11px] font-medium text-emerald-700 dark:text-emerald-300">Studio Voice</p>
+                  <audio :src="variantCleanedAudioUrl(variant.id)" controls preload="none" class="w-full" />
+                </div>
               </div>
             </div>
           </div>

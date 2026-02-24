@@ -27,6 +27,8 @@ dependencies = [
     "python-magic",
     # HTTP client (used by InvokeAI client)
     "httpx",
+    # Studio Voice gRPC client
+    "grpcio",
 ]
 
 [dependency-groups]

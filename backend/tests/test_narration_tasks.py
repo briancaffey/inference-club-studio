@@ -1,4 +1,5 @@
 import wave
+from datetime import datetime, timezone
 from pathlib import Path
 
 from app.models.narration import (
@@ -7,6 +8,7 @@ from app.models.narration import (
     NarrationVariant,
 )
 from app.models.project import Project
+from app.services.narration.studio_voice import StudioVoiceEnhancementResult
 from app.tasks import narration as narration_tasks
 
 
@@ -51,6 +53,23 @@ def test_failed_generation_attempt_keeps_audio_for_review(db, monkeypatch, tmp_p
     async def failing_transcribe(_path: str):
         raise RuntimeError("STT unavailable")
 
+    async def fake_enhance_audio(
+        _source_audio_path: str,
+        *,
+        output_audio_path: str | None = None,
+        check_health: bool = True,
+        client=None,
+    ) -> StudioVoiceEnhancementResult:
+        assert check_health is True
+        assert output_audio_path is not None
+        _write_test_wav(Path(output_audio_path), duration_ms=400)
+        return StudioVoiceEnhancementResult(
+            status="cleaned",
+            output_path=output_audio_path,
+            error_message=None,
+            cleaned_at=datetime.now(timezone.utc),
+        )
+
     monkeypatch.setattr(
         narration_tasks,
         "_project_output_dir",
@@ -61,6 +80,11 @@ def test_failed_generation_attempt_keeps_audio_for_review(db, monkeypatch, tmp_p
         narration_tasks,
         "transcribe_audio_file",
         failing_transcribe,
+    )
+    monkeypatch.setattr(
+        narration_tasks,
+        "enhance_audio_file",
+        fake_enhance_audio,
     )
 
     result = narration_tasks._run_single_attempt(
@@ -79,6 +103,9 @@ def test_failed_generation_attempt_keeps_audio_for_review(db, monkeypatch, tmp_p
     assert variant is not None
     assert Path(result.output_path).exists()
     assert result.output_path == variant.audio_path
+    assert result.studio_voice_status == "cleaned"
+    assert result.studio_voice_audio_path is not None
+    assert Path(result.studio_voice_audio_path).exists()
     assert result.quality.should_regenerate is True
     assert "No transcription returned from STT" in result.quality.reason
 
@@ -88,6 +115,8 @@ def test_failed_generation_attempt_keeps_audio_for_review(db, monkeypatch, tmp_p
     assert segment.status == "error"
     assert segment.needs_review is True
     assert segment.audio_path == result.output_path
+    assert segment.studio_voice_audio_path == result.studio_voice_audio_path
+    assert segment.studio_voice_status == "cleaned"
     assert segment.selected_variant_id == result.variant_id
     assert segment.duration_seconds == result.duration_seconds
 

@@ -117,6 +117,16 @@ async def services_health_check():
                 ("/health", "/transcribe", "/"),
             ),
         ),
+        (
+            "studio_voice",
+            "NVIDIA Studio Voice",
+            settings.studio_voice_url,
+            partial(
+                _check_http_reachable,
+                settings.studio_voice_health_url,
+                ("",),
+            ),
+        ),
     ]
 
     check_results = await asyncio.gather(

@@ -16,6 +16,7 @@ celery.conf.update(
     enable_utc=True,
     task_routes={
         "app.tasks.narration.generate_narration_segment_task": {"queue": "dia"},
+        "app.tasks.narration.clean_project_studio_voice_task": {"queue": "dia"},
     },
 )
 

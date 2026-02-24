@@ -43,10 +43,32 @@ class NarrationSegment(Base):
     service: Mapped[str] = mapped_column(String(50), nullable=False, default="dia")
     status: Mapped[str] = mapped_column(String(50), nullable=False, default="pending")
     audio_path: Mapped[str | None] = mapped_column(String(1000), nullable=True)
+    studio_voice_audio_path: Mapped[str | None] = mapped_column(
+        String(1000),
+        nullable=True,
+    )
+    studio_voice_status: Mapped[str] = mapped_column(
+        String(50),
+        nullable=False,
+        default="not_cleaned",
+    )
+    studio_voice_error_message: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+    )
+    studio_voice_cleaned_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
     duration_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     quality_score: Mapped[float | None] = mapped_column(Float, nullable=True)
     needs_review: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    is_final: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    last_generated_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
     generation_attempts: Mapped[int] = mapped_column(
         Integer,
         nullable=False,
@@ -99,6 +121,23 @@ class NarrationVariant(Base):
     sanitized_text: Mapped[str] = mapped_column(Text, nullable=False)
     service: Mapped[str] = mapped_column(String(50), nullable=False)
     audio_path: Mapped[str | None] = mapped_column(String(1000), nullable=True)
+    studio_voice_audio_path: Mapped[str | None] = mapped_column(
+        String(1000),
+        nullable=True,
+    )
+    studio_voice_status: Mapped[str] = mapped_column(
+        String(50),
+        nullable=False,
+        default="not_cleaned",
+    )
+    studio_voice_error_message: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+    )
+    studio_voice_cleaned_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
     duration_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)

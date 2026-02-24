@@ -4,7 +4,9 @@ import asyncio
 import logging
 import re
 import time
+import uuid
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 
 from sqlalchemy import func
@@ -37,6 +39,15 @@ from app.services.narration.quality import (
 )
 from app.services.narration.sanitize import sanitize_text
 from app.services.narration.stt import transcribe_audio_file
+from app.services.narration.studio_voice import (
+    STUDIO_VOICE_STATUS_CLEANED,
+    STUDIO_VOICE_STATUS_ERROR,
+    STUDIO_VOICE_STATUS_NOT_CLEANED,
+    STUDIO_VOICE_STATUS_UNAVAILABLE,
+    enhance_audio_file,
+    is_studio_voice_ready,
+    studio_voice_output_path,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +60,10 @@ class AttemptResult:
     attempt: int
     output_path: str
     duration_seconds: float
+    studio_voice_audio_path: str | None
+    studio_voice_status: str
+    studio_voice_error_message: str | None
+    studio_voice_cleaned_at: datetime | None
     transcription_text: str
     transcription_words: list[dict]
     quality: NarrationQualityResult
@@ -67,6 +82,59 @@ def _safe_unlink(path: str | None) -> None:
             Path(path).unlink()
     except Exception:
         logger.warning("Failed to remove temporary audio path %s", path)
+
+
+def _copy_variant_studio_voice_to_segment(
+    segment: NarrationSegment,
+    variant: NarrationVariant | None,
+) -> None:
+    if variant is None:
+        segment.studio_voice_audio_path = None
+        segment.studio_voice_status = STUDIO_VOICE_STATUS_NOT_CLEANED
+        segment.studio_voice_error_message = None
+        segment.studio_voice_cleaned_at = None
+        return
+
+    segment.studio_voice_audio_path = variant.studio_voice_audio_path
+    segment.studio_voice_status = (
+        variant.studio_voice_status or STUDIO_VOICE_STATUS_NOT_CLEANED
+    )
+    segment.studio_voice_error_message = variant.studio_voice_error_message
+    segment.studio_voice_cleaned_at = variant.studio_voice_cleaned_at
+
+
+def _has_cleaned_audio(path: str | None) -> bool:
+    if not path:
+        return False
+    return Path(path).exists()
+
+
+def _apply_studio_voice_result_to_variant(
+    variant: NarrationVariant,
+    *,
+    status: str,
+    output_path: str | None,
+    error_message: str | None,
+    cleaned_at: datetime | None,
+) -> None:
+    variant.studio_voice_status = status
+    variant.studio_voice_audio_path = output_path
+    variant.studio_voice_error_message = error_message
+    variant.studio_voice_cleaned_at = cleaned_at
+
+
+def _apply_studio_voice_result_to_segment(
+    segment: NarrationSegment,
+    *,
+    status: str,
+    output_path: str | None,
+    error_message: str | None,
+    cleaned_at: datetime | None,
+) -> None:
+    segment.studio_voice_status = status
+    segment.studio_voice_audio_path = output_path
+    segment.studio_voice_error_message = error_message
+    segment.studio_voice_cleaned_at = cleaned_at
 
 
 def _make_output_filename(position: int, text: str, variant_num: int = 0) -> str:
@@ -89,6 +157,14 @@ def _segment_payload(segment: NarrationSegment) -> dict:
         "service": segment.service,
         "status": segment.status,
         "audio_path": segment.audio_path,
+        "studio_voice_audio_path": segment.studio_voice_audio_path,
+        "studio_voice_status": segment.studio_voice_status,
+        "studio_voice_error_message": segment.studio_voice_error_message,
+        "studio_voice_cleaned_at": (
+            segment.studio_voice_cleaned_at.isoformat()
+            if segment.studio_voice_cleaned_at
+            else None
+        ),
         "duration_seconds": segment.duration_seconds,
         "error_message": segment.error_message,
         "selected_variant_id": segment.selected_variant_id,
@@ -97,6 +173,10 @@ def _segment_payload(segment: NarrationSegment) -> dict:
         "original_text": segment.original_text,
         "quality_score": segment.quality_score,
         "needs_review": segment.needs_review,
+        "is_final": segment.is_final,
+        "last_generated_at": (
+            segment.last_generated_at.isoformat() if segment.last_generated_at else None
+        ),
         "generation_attempts": segment.generation_attempts,
         "created_at": segment.created_at.isoformat() if segment.created_at else None,
         "updated_at": segment.updated_at.isoformat() if segment.updated_at else None,
@@ -226,10 +306,26 @@ def _run_single_attempt(
         service=segment.service,
         audio_path=str(output_path),
         duration_seconds=round(get_wav_duration(str(output_path)), 2),
+        studio_voice_status=STUDIO_VOICE_STATUS_NOT_CLEANED,
     )
     db.add(variant)
     db.commit()
     db.refresh(variant)
+
+    if settings.studio_voice_auto_clean and variant.audio_path:
+        studio_voice_result = asyncio.run(
+            enhance_audio_file(
+                variant.audio_path,
+                output_audio_path=studio_voice_output_path(variant.audio_path),
+                check_health=True,
+            )
+        )
+        variant.studio_voice_status = studio_voice_result.status
+        variant.studio_voice_audio_path = studio_voice_result.output_path
+        variant.studio_voice_error_message = studio_voice_result.error_message
+        variant.studio_voice_cleaned_at = studio_voice_result.cleaned_at
+        db.commit()
+        db.refresh(variant)
 
     transcription_text = ""
     words: list[dict] = []
@@ -263,6 +359,10 @@ def _run_single_attempt(
         attempt=attempt,
         output_path=str(output_path),
         duration_seconds=variant.duration_seconds or 0.0,
+        studio_voice_audio_path=variant.studio_voice_audio_path,
+        studio_voice_status=variant.studio_voice_status,
+        studio_voice_error_message=variant.studio_voice_error_message,
+        studio_voice_cleaned_at=variant.studio_voice_cleaned_at,
         transcription_text=transcription_text,
         transcription_words=words,
         quality=quality,
@@ -270,14 +370,25 @@ def _run_single_attempt(
     )
 
 
-def _finalize_success(db, segment: NarrationSegment, result: AttemptResult) -> None:
+def _finalize_success(
+    db,
+    segment: NarrationSegment,
+    result: AttemptResult,
+    *,
+    needs_review: bool = False,
+) -> None:
     segment.status = "done"
     segment.audio_path = result.output_path
+    segment.studio_voice_audio_path = result.studio_voice_audio_path
+    segment.studio_voice_status = result.studio_voice_status
+    segment.studio_voice_error_message = result.studio_voice_error_message
+    segment.studio_voice_cleaned_at = result.studio_voice_cleaned_at
     segment.duration_seconds = result.duration_seconds
     segment.error_message = None
     segment.selected_variant_id = result.variant_id
     segment.quality_score = result.quality.score
-    segment.needs_review = False
+    segment.needs_review = needs_review
+    segment.is_final = False
     segment.generation_attempts = result.attempt
 
     _upsert_transcription(
@@ -298,10 +409,15 @@ def _finalize_needs_review(
 ) -> None:
     segment.status = "error"
     segment.needs_review = True
+    segment.is_final = False
     segment.generation_attempts = MAX_GENERATION_ATTEMPTS
 
     if best_result:
         segment.audio_path = best_result.output_path
+        segment.studio_voice_audio_path = best_result.studio_voice_audio_path
+        segment.studio_voice_status = best_result.studio_voice_status
+        segment.studio_voice_error_message = best_result.studio_voice_error_message
+        segment.studio_voice_cleaned_at = best_result.studio_voice_cleaned_at
         segment.duration_seconds = best_result.duration_seconds
         segment.selected_variant_id = best_result.variant_id
         segment.quality_score = best_result.quality.score
@@ -323,6 +439,10 @@ def _finalize_needs_review(
             ).delete(synchronize_session=False)
     else:
         segment.audio_path = None
+        segment.studio_voice_audio_path = None
+        segment.studio_voice_status = STUDIO_VOICE_STATUS_NOT_CLEANED
+        segment.studio_voice_error_message = None
+        segment.studio_voice_cleaned_at = None
         segment.duration_seconds = None
         segment.selected_variant_id = None
         segment.quality_score = 0.0
@@ -346,6 +466,7 @@ def generate_narration_segment_task(
     index: int,
     total: int,
     text_override: str | None = None,
+    mark_needs_review: bool = False,
 ):
     set_narration_active_job(job_id)
     increment_narration_queue_depth(-1)
@@ -386,7 +507,9 @@ def generate_narration_segment_task(
 
         segment.status = "generating"
         segment.error_message = None
-        segment.needs_review = False
+        segment.needs_review = mark_needs_review
+        segment.is_final = False
+        segment.last_generated_at = datetime.now(timezone.utc)
         db.commit()
 
         raw_text = text_override if text_override else segment.text
@@ -435,7 +558,12 @@ def generate_narration_segment_task(
                     result.quality.score >= QUALITY_ACCEPT_THRESHOLD
                     and not result.quality.should_regenerate
                 ):
-                    _finalize_success(db, segment, result)
+                    _finalize_success(
+                        db,
+                        segment,
+                        result,
+                        needs_review=mark_needs_review,
+                    )
                     publish_narration_event(
                         {
                             "type": "segment_done",
@@ -485,7 +613,8 @@ def generate_narration_segment_task(
         )
         if segment:
             segment.status = "error"
-            segment.needs_review = False
+            segment.needs_review = mark_needs_review
+            segment.is_final = False
             segment.error_message = str(exc)[:1000]
             db.commit()
         publish_narration_event(
@@ -507,3 +636,165 @@ def generate_narration_segment_task(
 
         if progress:
             _publish_job_terminal_event(progress)
+
+
+@celery.task(bind=True, max_retries=0, queue="dia")
+def clean_project_studio_voice_task(
+    self,
+    *,
+    project_id: str,
+) -> dict:
+    db = SessionLocal()
+    cleaned = 0
+    skipped = 0
+    failed = 0
+
+    try:
+        project_uuid = uuid.UUID(project_id)
+    except ValueError:
+        logger.error(
+            "Invalid project id for Studio Voice clean-all task: %s", project_id
+        )
+        return {
+            "project_id": project_id,
+            "cleaned": cleaned,
+            "skipped": skipped,
+            "failed": failed + 1,
+            "error": "Invalid project id",
+        }
+
+    try:
+        if not asyncio.run(is_studio_voice_ready()):
+            logger.warning(
+                "Studio Voice clean-all skipped for project %s: service unavailable",
+                project_id,
+            )
+            return {
+                "project_id": project_id,
+                "cleaned": cleaned,
+                "skipped": skipped,
+                "failed": failed,
+                "error": "Studio Voice service unavailable",
+            }
+
+        segments = (
+            db.query(NarrationSegment)
+            .filter(NarrationSegment.project_id == project_uuid)
+            .order_by(NarrationSegment.position.asc())
+            .all()
+        )
+
+        for segment in segments:
+            variants = (
+                db.query(NarrationVariant)
+                .filter(NarrationVariant.segment_id == segment.id)
+                .order_by(NarrationVariant.created_at.desc())
+                .all()
+            )
+
+            if variants:
+                for variant in variants:
+                    if not variant.audio_path or not Path(variant.audio_path).exists():
+                        skipped += 1
+                        continue
+                    if _has_cleaned_audio(variant.studio_voice_audio_path):
+                        skipped += 1
+                        continue
+
+                    result = asyncio.run(
+                        enhance_audio_file(
+                            variant.audio_path,
+                            output_audio_path=studio_voice_output_path(
+                                variant.audio_path
+                            ),
+                            check_health=False,
+                        )
+                    )
+                    _apply_studio_voice_result_to_variant(
+                        variant,
+                        status=result.status,
+                        output_path=result.output_path,
+                        error_message=result.error_message,
+                        cleaned_at=result.cleaned_at,
+                    )
+                    if result.status == STUDIO_VOICE_STATUS_CLEANED:
+                        cleaned += 1
+                    elif result.status in {
+                        STUDIO_VOICE_STATUS_ERROR,
+                        STUDIO_VOICE_STATUS_UNAVAILABLE,
+                    }:
+                        failed += 1
+                    else:
+                        skipped += 1
+
+                selected_variant = None
+                if segment.selected_variant_id:
+                    selected_variant = next(
+                        (
+                            variant
+                            for variant in variants
+                            if variant.id == segment.selected_variant_id
+                        ),
+                        None,
+                    )
+                if selected_variant is None and variants:
+                    selected_variant = variants[0]
+                _copy_variant_studio_voice_to_segment(segment, selected_variant)
+                db.commit()
+                continue
+
+            if not segment.audio_path or not Path(segment.audio_path).exists():
+                skipped += 1
+                db.commit()
+                continue
+
+            if _has_cleaned_audio(segment.studio_voice_audio_path):
+                skipped += 1
+                db.commit()
+                continue
+
+            result = asyncio.run(
+                enhance_audio_file(
+                    segment.audio_path,
+                    output_audio_path=studio_voice_output_path(segment.audio_path),
+                    check_health=False,
+                )
+            )
+            _apply_studio_voice_result_to_segment(
+                segment,
+                status=result.status,
+                output_path=result.output_path,
+                error_message=result.error_message,
+                cleaned_at=result.cleaned_at,
+            )
+            if result.status == STUDIO_VOICE_STATUS_CLEANED:
+                cleaned += 1
+            elif result.status in {
+                STUDIO_VOICE_STATUS_ERROR,
+                STUDIO_VOICE_STATUS_UNAVAILABLE,
+            }:
+                failed += 1
+            else:
+                skipped += 1
+            db.commit()
+
+        return {
+            "project_id": project_id,
+            "cleaned": cleaned,
+            "skipped": skipped,
+            "failed": failed,
+        }
+    except Exception:
+        logger.exception(
+            "Studio Voice clean-all failed for project %s",
+            project_id,
+        )
+        return {
+            "project_id": project_id,
+            "cleaned": cleaned,
+            "skipped": skipped,
+            "failed": failed + 1,
+            "error": "Unexpected Studio Voice clean-all failure",
+        }
+    finally:
+        db.close()

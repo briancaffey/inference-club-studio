@@ -167,6 +167,7 @@ export interface InferenceServicesHealthResponse {
 
 export type NarrationService = 'dia' | 'magpie'
 export type NarrationSegmentStatus = 'pending' | 'queued' | 'generating' | 'done' | 'error'
+export type NarrationStudioVoiceStatus = 'not_cleaned' | 'cleaned' | 'unavailable' | 'error'
 
 export interface NarrationSegment {
   id: number
@@ -177,10 +178,16 @@ export interface NarrationSegment {
   service: NarrationService | string
   status: NarrationSegmentStatus | string
   audio_path: string | null
+  studio_voice_audio_path: string | null
+  studio_voice_status: NarrationStudioVoiceStatus | string
+  studio_voice_error_message: string | null
+  studio_voice_cleaned_at: string | null
   duration_seconds: number | null
   error_message: string | null
   quality_score: number | null
   needs_review: boolean
+  is_final: boolean
+  last_generated_at: string | null
   generation_attempts: number
   selected_variant_id: number | null
   voice_sample_id: number | null
@@ -197,6 +204,10 @@ export interface NarrationVariant {
   sanitized_text: string
   service: NarrationService | string
   audio_path: string | null
+  studio_voice_audio_path: string | null
+  studio_voice_status: NarrationStudioVoiceStatus | string
+  studio_voice_error_message: string | null
+  studio_voice_cleaned_at: string | null
   duration_seconds: number | null
   created_at: string
 }

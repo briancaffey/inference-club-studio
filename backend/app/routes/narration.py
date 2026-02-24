@@ -58,7 +58,15 @@ from app.services.narration.events import (
 from app.services.narration.magpie import list_voices
 from app.services.narration.sanitize import sanitize_text
 from app.services.narration.stt import transcribe_audio_file
-from app.tasks.narration import generate_narration_segment_task
+from app.services.narration.studio_voice import (
+    STUDIO_VOICE_STATUS_NOT_CLEANED,
+    enhance_audio_file,
+    studio_voice_output_path,
+)
+from app.tasks.narration import (
+    clean_project_studio_voice_task,
+    generate_narration_segment_task,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -233,10 +241,16 @@ def _segment_to_dict(segment: NarrationSegment) -> dict:
         "service": segment.service,
         "status": segment.status,
         "audio_path": segment.audio_path,
+        "studio_voice_audio_path": segment.studio_voice_audio_path,
+        "studio_voice_status": segment.studio_voice_status,
+        "studio_voice_error_message": segment.studio_voice_error_message,
+        "studio_voice_cleaned_at": segment.studio_voice_cleaned_at,
         "duration_seconds": segment.duration_seconds,
         "error_message": segment.error_message,
         "quality_score": segment.quality_score,
         "needs_review": segment.needs_review,
+        "is_final": segment.is_final,
+        "last_generated_at": segment.last_generated_at,
         "generation_attempts": segment.generation_attempts,
         "selected_variant_id": segment.selected_variant_id,
         "voice_sample_id": segment.voice_sample_id,
@@ -255,6 +269,10 @@ def _variant_to_dict(variant: NarrationVariant) -> dict:
         "sanitized_text": variant.sanitized_text,
         "service": variant.service,
         "audio_path": variant.audio_path,
+        "studio_voice_audio_path": variant.studio_voice_audio_path,
+        "studio_voice_status": variant.studio_voice_status,
+        "studio_voice_error_message": variant.studio_voice_error_message,
+        "studio_voice_cleaned_at": variant.studio_voice_cleaned_at,
         "duration_seconds": variant.duration_seconds,
         "created_at": variant.created_at,
     }
@@ -310,45 +328,213 @@ def _list_variants(segment_id: int, db: Session) -> list[NarrationVariant]:
     )
 
 
+def _resolve_existing_segment_audio_path(
+    segment: NarrationSegment,
+    db: Session,
+    *,
+    persist: bool = True,
+) -> str | None:
+    if segment.audio_path and os.path.exists(segment.audio_path):
+        return segment.audio_path
+
+    variants = _list_variants(segment.id, db)
+
+    selected_variant = None
+    if segment.selected_variant_id:
+        selected_variant = next(
+            (
+                variant
+                for variant in variants
+                if variant.id == segment.selected_variant_id
+            ),
+            None,
+        )
+    if (
+        selected_variant
+        and selected_variant.audio_path
+        and os.path.exists(selected_variant.audio_path)
+    ):
+        segment.audio_path = selected_variant.audio_path
+        if persist:
+            db.commit()
+            db.refresh(segment)
+        return segment.audio_path
+
+    fallback_variant = next(
+        (
+            variant
+            for variant in variants
+            if variant.audio_path and os.path.exists(variant.audio_path)
+        ),
+        None,
+    )
+    if not fallback_variant:
+        return None
+
+    segment.audio_path = fallback_variant.audio_path
+    segment.selected_variant_id = fallback_variant.id
+    if persist:
+        db.commit()
+        db.refresh(segment)
+    return segment.audio_path
+
+
+def _resolve_existing_segment_cleaned_audio_path(
+    segment: NarrationSegment,
+    db: Session,
+    *,
+    persist: bool = True,
+) -> str | None:
+    if segment.studio_voice_audio_path and os.path.exists(
+        segment.studio_voice_audio_path
+    ):
+        return segment.studio_voice_audio_path
+
+    variants = _list_variants(segment.id, db)
+
+    selected_variant = None
+    if segment.selected_variant_id:
+        selected_variant = next(
+            (
+                variant
+                for variant in variants
+                if variant.id == segment.selected_variant_id
+            ),
+            None,
+        )
+
+    candidate = None
+    if (
+        selected_variant
+        and selected_variant.studio_voice_audio_path
+        and os.path.exists(selected_variant.studio_voice_audio_path)
+    ):
+        candidate = selected_variant
+    else:
+        candidate = next(
+            (
+                variant
+                for variant in variants
+                if variant.studio_voice_audio_path
+                and os.path.exists(variant.studio_voice_audio_path)
+            ),
+            None,
+        )
+
+    if not candidate:
+        return None
+
+    segment.studio_voice_audio_path = candidate.studio_voice_audio_path
+    segment.studio_voice_status = candidate.studio_voice_status
+    segment.studio_voice_error_message = candidate.studio_voice_error_message
+    segment.studio_voice_cleaned_at = candidate.studio_voice_cleaned_at
+    if persist:
+        db.commit()
+        db.refresh(segment)
+    return segment.studio_voice_audio_path
+
+
+def _compute_waveform_samples(audio_path: str, points: int) -> tuple[list[float], int]:
+    clip = load_and_normalize(audio_path)
+    samples = clip.get_array_of_samples()
+    duration_ms = max(1, len(clip))
+
+    if not samples:
+        return [0.0 for _ in range(points)], duration_ms
+
+    total_samples = len(samples)
+    bucket_size = max(1, total_samples // points)
+    averaged: list[float] = []
+    max_value = 0.0
+
+    for index in range(points):
+        start = index * bucket_size
+        if start >= total_samples:
+            averaged.append(0.0)
+            continue
+        end = min(total_samples, start + bucket_size)
+        if end <= start:
+            averaged.append(0.0)
+            continue
+
+        abs_sum = 0.0
+        for sample in samples[start:end]:
+            abs_sum += abs(float(sample))
+        value = abs_sum / (end - start)
+        averaged.append(value)
+        if value > max_value:
+            max_value = value
+
+    if max_value <= 0:
+        normalized = [0.0 for _ in averaged]
+    else:
+        normalized = [round(value / max_value, 6) for value in averaged]
+
+    return normalized, duration_ms
+
+
 def _collect_project_audio_paths(project_id: uuid.UUID, db: Session) -> list[str]:
     segment_paths = (
-        db.query(NarrationSegment.audio_path)
+        db.query(NarrationSegment.audio_path, NarrationSegment.studio_voice_audio_path)
         .filter(
             NarrationSegment.project_id == project_id,
-            NarrationSegment.audio_path.isnot(None),
+            (
+                NarrationSegment.audio_path.isnot(None)
+                | NarrationSegment.studio_voice_audio_path.isnot(None)
+            ),
         )
         .all()
     )
     variant_paths = (
-        db.query(NarrationVariant.audio_path)
+        db.query(NarrationVariant.audio_path, NarrationVariant.studio_voice_audio_path)
         .join(NarrationSegment, NarrationVariant.segment_id == NarrationSegment.id)
         .filter(
             NarrationSegment.project_id == project_id,
-            NarrationVariant.audio_path.isnot(None),
+            (
+                NarrationVariant.audio_path.isnot(None)
+                | NarrationVariant.studio_voice_audio_path.isnot(None)
+            ),
         )
         .all()
     )
-    return [p for (p,) in (segment_paths + variant_paths) if p]
+    collected = set()
+    for source_path, cleaned_path in segment_paths + variant_paths:
+        if source_path:
+            collected.add(source_path)
+        if cleaned_path:
+            collected.add(cleaned_path)
+    return sorted(collected)
 
 
 def _collect_segment_audio_paths(segment_id: int, db: Session) -> list[str]:
     segment_path = (
-        db.query(NarrationSegment.audio_path)
+        db.query(NarrationSegment.audio_path, NarrationSegment.studio_voice_audio_path)
         .filter(
             NarrationSegment.id == segment_id,
-            NarrationSegment.audio_path.isnot(None),
+            (
+                NarrationSegment.audio_path.isnot(None)
+                | NarrationSegment.studio_voice_audio_path.isnot(None)
+            ),
         )
         .all()
     )
     variant_paths = (
-        db.query(NarrationVariant.audio_path)
+        db.query(NarrationVariant.audio_path, NarrationVariant.studio_voice_audio_path)
         .filter(
             NarrationVariant.segment_id == segment_id,
-            NarrationVariant.audio_path.isnot(None),
+            (
+                NarrationVariant.audio_path.isnot(None)
+                | NarrationVariant.studio_voice_audio_path.isnot(None)
+            ),
         )
         .all()
     )
-    unique = {p for (p,) in (segment_path + variant_paths) if p}
+    unique = set()
+    for source_path, cleaned_path in segment_path + variant_paths:
+        if source_path:
+            unique.add(source_path)
+        if cleaned_path:
+            unique.add(cleaned_path)
     return sorted(unique)
 
 
@@ -524,6 +710,7 @@ class GenerationJob:
     id: str = field(default_factory=lambda: uuid.uuid4().hex[:8])
     segment_ids: list[int] = field(default_factory=list)
     text_overrides: dict[int, str] = field(default_factory=dict)
+    review_segment_ids: list[int] = field(default_factory=list)
     project_id: uuid.UUID | None = None
 
 
@@ -669,6 +856,11 @@ class SegmentUpdate(BaseModel):
     service: str | None = None
     voice_sample_id: int | None = None
     magpie_voice: str | None = None
+
+
+class SegmentFlagsUpdate(BaseModel):
+    is_final: bool | None = None
+    needs_review: bool | None = None
 
 
 class SegmentSplitRequest(BaseModel):
@@ -868,10 +1060,16 @@ async def api_update_segment(
         segment.sanitized_text = sanitize_text(body.text)
         segment.status = "pending"
         segment.audio_path = None
+        segment.studio_voice_audio_path = None
+        segment.studio_voice_status = STUDIO_VOICE_STATUS_NOT_CLEANED
+        segment.studio_voice_error_message = None
+        segment.studio_voice_cleaned_at = None
         segment.duration_seconds = None
         segment.error_message = None
         segment.quality_score = None
         segment.needs_review = False
+        segment.is_final = False
+        segment.last_generated_at = None
         segment.generation_attempts = 0
         segment.selected_variant_id = None
         db.query(NarrationTranscription).filter(
@@ -887,6 +1085,60 @@ async def api_update_segment(
         )
     if body.magpie_voice is not None:
         segment.magpie_voice = body.magpie_voice if body.magpie_voice else None
+
+    db.commit()
+    db.refresh(segment)
+    return _segment_to_dict(segment)
+
+
+@router.patch("/api/segments/{segment_id}/flags")
+async def api_update_segment_flags(
+    segment_id: int,
+    body: SegmentFlagsUpdate,
+    db: Session = Depends(get_db),
+):
+    segment = (
+        db.query(NarrationSegment).filter(NarrationSegment.id == segment_id).first()
+    )
+    if not segment:
+        raise HTTPException(404, "Segment not found")
+
+    if body.is_final is None and body.needs_review is None:
+        raise HTTPException(400, "No segment flags provided")
+
+    if body.is_final is not None:
+        segment.is_final = body.is_final
+        if body.is_final:
+            segment.needs_review = False
+
+    if body.needs_review is not None:
+        segment.needs_review = body.needs_review
+        if body.needs_review:
+            segment.is_final = False
+
+    db.commit()
+    db.refresh(segment)
+    return _segment_to_dict(segment)
+
+
+@router.post("/api/segments/{segment_id}/mark-done")
+async def api_mark_segment_done(segment_id: int, db: Session = Depends(get_db)):
+    segment = (
+        db.query(NarrationSegment).filter(NarrationSegment.id == segment_id).first()
+    )
+    if not segment:
+        raise HTTPException(404, "Segment not found")
+
+    audio_path = _resolve_existing_segment_audio_path(segment, db)
+    if not audio_path:
+        raise HTTPException(400, "Segment has no audio to mark done")
+
+    segment.status = "done"
+    segment.error_message = None
+    segment.needs_review = False
+    if segment.duration_seconds is None:
+        with suppress(Exception):
+            segment.duration_seconds = round(get_wav_duration(audio_path), 2)
 
     db.commit()
     db.refresh(segment)
@@ -1003,10 +1255,12 @@ async def api_delete_segment(segment_id: int, db: Session = Depends(get_db)):
         raise HTTPException(404, "Segment not found")
 
     _safe_unlink(segment.audio_path)
+    _safe_unlink(segment.studio_voice_audio_path)
 
     variants = _list_variants(segment_id, db)
     for variant in variants:
         _safe_unlink(variant.audio_path)
+        _safe_unlink(variant.studio_voice_audio_path)
 
     db.delete(segment)
     db.commit()
@@ -1157,11 +1411,17 @@ async def api_sync_segments(
             segment.position = position
             segment.status = "pending"
             segment.audio_path = None
+            segment.studio_voice_audio_path = None
+            segment.studio_voice_status = STUDIO_VOICE_STATUS_NOT_CLEANED
+            segment.studio_voice_error_message = None
+            segment.studio_voice_cleaned_at = None
             segment.duration_seconds = None
             segment.selected_variant_id = None
             segment.error_message = None
             segment.quality_score = None
             segment.needs_review = False
+            segment.is_final = False
+            segment.last_generated_at = None
             segment.generation_attempts = 0
             changed += 1
             continue
@@ -1225,9 +1485,61 @@ async def api_get_audio(segment_id: int, db: Session = Depends(get_db)):
     )
     if not segment:
         raise HTTPException(404, "Segment not found")
-    if not segment.audio_path or not os.path.exists(segment.audio_path):
+
+    audio_path = _resolve_existing_segment_audio_path(segment, db)
+    if not audio_path:
         raise HTTPException(404, "Audio not generated yet")
-    return FileResponse(segment.audio_path, media_type="audio/wav")
+    return FileResponse(audio_path, media_type="audio/wav")
+
+
+@router.get("/api/segments/{segment_id}/audio/cleaned")
+async def api_get_cleaned_audio(segment_id: int, db: Session = Depends(get_db)):
+    segment = (
+        db.query(NarrationSegment).filter(NarrationSegment.id == segment_id).first()
+    )
+    if not segment:
+        raise HTTPException(404, "Segment not found")
+
+    cleaned_path = _resolve_existing_segment_cleaned_audio_path(segment, db)
+    if not cleaned_path:
+        raise HTTPException(404, "Studio Voice audio not generated yet")
+    return FileResponse(cleaned_path, media_type="audio/wav")
+
+
+@router.get("/api/segments/{segment_id}/waveform")
+async def api_get_segment_waveform(
+    segment_id: int,
+    points: int = Query(520, ge=64, le=4096),
+    source: Literal["original", "cleaned"] = Query("original"),
+    db: Session = Depends(get_db),
+):
+    segment = (
+        db.query(NarrationSegment).filter(NarrationSegment.id == segment_id).first()
+    )
+    if not segment:
+        raise HTTPException(404, "Segment not found")
+
+    if source == "cleaned":
+        audio_path = _resolve_existing_segment_cleaned_audio_path(segment, db)
+    else:
+        audio_path = _resolve_existing_segment_audio_path(segment, db)
+
+    if not audio_path:
+        raise HTTPException(404, f"{source.title()} audio not available for waveform")
+
+    try:
+        samples, duration_ms = _compute_waveform_samples(audio_path, points)
+    except Exception as exc:
+        raise HTTPException(500, f"Waveform generation failed: {exc}")
+
+    return {
+        "segment_id": segment.id,
+        "source": source,
+        "audio_path": audio_path,
+        "points": points,
+        "duration_ms": duration_ms,
+        "samples": samples,
+    }
 
 
 @router.get("/api/voices")
@@ -1461,10 +1773,12 @@ async def api_transcribe_segment(segment_id: int, db: Session = Depends(get_db))
     )
     if not segment:
         raise HTTPException(404, "Segment not found")
-    if not segment.audio_path or not os.path.exists(segment.audio_path):
+
+    audio_path = _resolve_existing_segment_audio_path(segment, db)
+    if not audio_path:
         raise HTTPException(400, "Segment has no audio to transcribe")
 
-    text, words = await _transcribe_audio_file_or_502(segment.audio_path)
+    text, words = await _transcribe_audio_file_or_502(audio_path)
     transcription = _upsert_transcription(db, segment_id, text, words)
 
     return _transcription_to_dict(transcription)
@@ -1512,10 +1826,12 @@ async def api_trim_segment(
     )
     if not segment:
         raise HTTPException(404, "Segment not found")
-    if not segment.audio_path or not os.path.exists(segment.audio_path):
+
+    audio_path = _resolve_existing_segment_audio_path(segment, db)
+    if not audio_path:
         raise HTTPException(400, "Segment has no audio to trim")
 
-    duration_ms = max(1, int(round(get_wav_duration(segment.audio_path) * 1000)))
+    duration_ms = max(1, int(round(get_wav_duration(audio_path) * 1000)))
     start_ms = max(0, body.start_ms)
     end_ms = min(duration_ms, body.end_ms)
     trim_mode = body.mode
@@ -1527,15 +1843,43 @@ async def api_trim_segment(
     if trim_mode == "remove" and duration_ms - (end_ms - start_ms) < 50:
         raise HTTPException(400, "Trim must leave at least 50ms of audio")
 
-    new_duration = trim_audio(segment.audio_path, start_ms, end_ms, mode=trim_mode)
+    new_duration = trim_audio(audio_path, start_ms, end_ms, mode=trim_mode)
     rounded_duration = round(new_duration, 2)
     segment.duration_seconds = rounded_duration
 
+    selected_variant = (
+        db.query(NarrationVariant)
+        .filter(
+            NarrationVariant.segment_id == segment_id,
+            NarrationVariant.audio_path == audio_path,
+        )
+        .first()
+    )
+    if selected_variant:
+        selected_variant.duration_seconds = rounded_duration
+        _safe_unlink(selected_variant.studio_voice_audio_path)
+        selected_variant.studio_voice_audio_path = None
+        selected_variant.studio_voice_status = STUDIO_VOICE_STATUS_NOT_CLEANED
+        selected_variant.studio_voice_error_message = None
+        selected_variant.studio_voice_cleaned_at = None
+
+    _safe_unlink(segment.studio_voice_audio_path)
+    segment.studio_voice_audio_path = None
+    segment.studio_voice_status = STUDIO_VOICE_STATUS_NOT_CLEANED
+    segment.studio_voice_error_message = None
+    segment.studio_voice_cleaned_at = None
+
     db.query(NarrationVariant).filter(
         NarrationVariant.segment_id == segment_id,
-        NarrationVariant.audio_path == segment.audio_path,
+        NarrationVariant.audio_path == audio_path,
     ).update(
-        {NarrationVariant.duration_seconds: rounded_duration},
+        {
+            NarrationVariant.duration_seconds: rounded_duration,
+            NarrationVariant.studio_voice_audio_path: None,
+            NarrationVariant.studio_voice_status: STUDIO_VOICE_STATUS_NOT_CLEANED,
+            NarrationVariant.studio_voice_error_message: None,
+            NarrationVariant.studio_voice_cleaned_at: None,
+        },
         synchronize_session=False,
     )
 
@@ -1546,7 +1890,7 @@ async def api_trim_segment(
 
     transcription_payload = None
     try:
-        text, words = await _transcribe_audio_file(segment.audio_path)
+        text, words = await _transcribe_audio_file(audio_path)
         transcription = _upsert_transcription(db, segment_id, text, words)
         transcription_payload = _transcription_to_dict(transcription)
     except Exception as exc:
@@ -1555,6 +1899,40 @@ async def api_trim_segment(
             segment_id,
             exc,
         )
+
+    if settings.studio_voice_auto_clean and os.path.exists(audio_path):
+        studio_voice_result = await enhance_audio_file(
+            audio_path,
+            output_audio_path=studio_voice_output_path(audio_path),
+            check_health=True,
+        )
+
+        segment.studio_voice_audio_path = studio_voice_result.output_path
+        segment.studio_voice_status = studio_voice_result.status
+        segment.studio_voice_error_message = studio_voice_result.error_message
+        segment.studio_voice_cleaned_at = studio_voice_result.cleaned_at
+
+        if selected_variant:
+            selected_variant.studio_voice_audio_path = studio_voice_result.output_path
+            selected_variant.studio_voice_status = studio_voice_result.status
+            selected_variant.studio_voice_error_message = (
+                studio_voice_result.error_message
+            )
+            selected_variant.studio_voice_cleaned_at = studio_voice_result.cleaned_at
+
+        db.query(NarrationVariant).filter(
+            NarrationVariant.segment_id == segment_id,
+            NarrationVariant.audio_path == audio_path,
+        ).update(
+            {
+                NarrationVariant.studio_voice_audio_path: studio_voice_result.output_path,
+                NarrationVariant.studio_voice_status: studio_voice_result.status,
+                NarrationVariant.studio_voice_error_message: studio_voice_result.error_message,
+                NarrationVariant.studio_voice_cleaned_at: studio_voice_result.cleaned_at,
+            },
+            synchronize_session=False,
+        )
+        db.commit()
 
     db.refresh(segment)
     return {
@@ -1627,19 +2005,61 @@ async def api_transcribe_all(project_id: uuid.UUID, db: Session = Depends(get_db
 # --- Generation ---
 
 
+def _segment_needs_studio_voice_clean(segment: NarrationSegment) -> bool:
+    if not segment.audio_path or not os.path.exists(segment.audio_path):
+        return False
+    if segment.studio_voice_audio_path and os.path.exists(
+        segment.studio_voice_audio_path
+    ):
+        return False
+    return True
+
+
+def _variant_needs_studio_voice_clean(variant: NarrationVariant) -> bool:
+    if not variant.audio_path or not os.path.exists(variant.audio_path):
+        return False
+    if variant.studio_voice_audio_path and os.path.exists(
+        variant.studio_voice_audio_path
+    ):
+        return False
+    return True
+
+
+def _count_project_studio_voice_cleanable_items(
+    project_id: uuid.UUID,
+    db: Session,
+) -> int:
+    count = 0
+    segments = _list_segments(project_id, db)
+    for segment in segments:
+        variants = _list_variants(segment.id, db)
+        if variants:
+            count += sum(
+                1 for variant in variants if _variant_needs_studio_voice_clean(variant)
+            )
+            continue
+        if _segment_needs_studio_voice_clean(segment):
+            count += 1
+    return count
+
+
 def _enqueue_generation_job(
     *,
     segment_ids: list[int],
     text_overrides: dict[int, str] | None = None,
+    review_segment_ids: list[int] | None = None,
     project_id: uuid.UUID | None = None,
 ) -> GenerationJob:
     job = GenerationJob(
         segment_ids=segment_ids,
         text_overrides=text_overrides or {},
+        review_segment_ids=review_segment_ids or [],
         project_id=project_id,
     )
     init_narration_job(job.id, total=len(segment_ids))
     increment_narration_queue_depth(len(segment_ids))
+
+    review_ids = set(job.review_segment_ids)
 
     for index, segment_id in enumerate(segment_ids):
         text_override = job.text_overrides.get(segment_id)
@@ -1648,6 +2068,7 @@ def _enqueue_generation_job(
             "job_id": job.id,
             "index": index,
             "total": len(segment_ids),
+            "mark_needs_review": segment_id in review_ids,
         }
         if text_override:
             kwargs["text_override"] = text_override
@@ -1716,6 +2137,26 @@ async def api_generate_failed(project_id: uuid.UUID, db: Session = Depends(get_d
     return {"job_id": job.id, "queued": len(failed_segments)}
 
 
+@router.post("/api/projects/{project_id}/studio-voice/clean-all", status_code=202)
+async def api_clean_all_with_studio_voice(
+    project_id: uuid.UUID,
+    db: Session = Depends(get_db),
+):
+    _get_narration_project_or_404(project_id, db)
+    cleanable = _count_project_studio_voice_cleanable_items(project_id, db)
+    if cleanable == 0:
+        return {
+            "message": "All eligible audio is already Studio Voice cleaned",
+            "queued": 0,
+        }
+
+    task = clean_project_studio_voice_task.apply_async(
+        kwargs={"project_id": str(project_id)},
+        queue="dia",
+    )
+    return {"task_id": task.id, "queued": cleanable}
+
+
 @router.post("/api/generation/cancel")
 async def api_cancel_generation():
     active_job_id = get_narration_active_job()
@@ -1769,7 +2210,17 @@ async def api_export(
     if not done_segments:
         raise HTTPException(400, "No audio segments to export")
 
-    paths = [segment.audio_path for segment in done_segments]
+    paths = [
+        (
+            segment.studio_voice_audio_path
+            if (
+                segment.studio_voice_audio_path
+                and os.path.exists(segment.studio_voice_audio_path)
+            )
+            else segment.audio_path
+        )
+        for segment in done_segments
+    ]
     combined = concatenate_segments(
         paths,
         gap_ms=gap_ms,
@@ -1804,11 +2255,16 @@ async def api_regenerate_segment(
     if not segment:
         raise HTTPException(404, "Segment not found")
 
+    segment.needs_review = True
+    segment.is_final = False
+    db.commit()
+
     text_override = body.text if body else None
     overrides = {segment_id: text_override} if text_override else {}
     job = _enqueue_generation_job(
         segment_ids=[segment_id],
         text_overrides=overrides,
+        review_segment_ids=[segment_id],
         project_id=segment.project_id,
     )
     await _broadcast_job_queued(job)
@@ -1847,10 +2303,15 @@ async def api_select_variant(
 
     segment.status = "done"
     segment.audio_path = variant.audio_path
+    segment.studio_voice_audio_path = variant.studio_voice_audio_path
+    segment.studio_voice_status = variant.studio_voice_status
+    segment.studio_voice_error_message = variant.studio_voice_error_message
+    segment.studio_voice_cleaned_at = variant.studio_voice_cleaned_at
     segment.duration_seconds = variant.duration_seconds
     segment.selected_variant_id = variant_id
     segment.error_message = None
     segment.needs_review = False
+    segment.is_final = False
     db.query(NarrationTranscription).filter(
         NarrationTranscription.segment_id == segment_id
     ).delete(synchronize_session=False)
@@ -1869,6 +2330,20 @@ async def api_get_variant_audio(variant_id: int, db: Session = Depends(get_db)):
     if not variant.audio_path or not os.path.exists(variant.audio_path):
         raise HTTPException(404, "Variant audio not found")
     return FileResponse(variant.audio_path, media_type="audio/wav")
+
+
+@router.get("/api/variants/{variant_id}/audio/cleaned")
+async def api_get_variant_cleaned_audio(variant_id: int, db: Session = Depends(get_db)):
+    variant = (
+        db.query(NarrationVariant).filter(NarrationVariant.id == variant_id).first()
+    )
+    if not variant:
+        raise HTTPException(404, "Variant not found")
+    if not variant.studio_voice_audio_path or not os.path.exists(
+        variant.studio_voice_audio_path
+    ):
+        raise HTTPException(404, "Variant Studio Voice audio not found")
+    return FileResponse(variant.studio_voice_audio_path, media_type="audio/wav")
 
 
 @router.delete("/api/variants/{variant_id}")
@@ -1894,25 +2369,37 @@ async def api_delete_variant(variant_id: int, db: Session = Depends(get_db)):
         if other_variants:
             best = other_variants[0]
             segment.audio_path = best.audio_path
+            segment.studio_voice_audio_path = best.studio_voice_audio_path
+            segment.studio_voice_status = best.studio_voice_status
+            segment.studio_voice_error_message = best.studio_voice_error_message
+            segment.studio_voice_cleaned_at = best.studio_voice_cleaned_at
             segment.duration_seconds = best.duration_seconds
             segment.selected_variant_id = best.id
             segment.status = "done"
             segment.error_message = None
             segment.needs_review = False
+            segment.is_final = False
         else:
             segment.status = "pending"
             segment.audio_path = None
+            segment.studio_voice_audio_path = None
+            segment.studio_voice_status = STUDIO_VOICE_STATUS_NOT_CLEANED
+            segment.studio_voice_error_message = None
+            segment.studio_voice_cleaned_at = None
             segment.duration_seconds = None
             segment.selected_variant_id = None
             segment.error_message = None
             segment.quality_score = None
             segment.needs_review = False
+            segment.is_final = False
+            segment.last_generated_at = None
             segment.generation_attempts = 0
         db.query(NarrationTranscription).filter(
             NarrationTranscription.segment_id == segment.id
         ).delete(synchronize_session=False)
 
     _safe_unlink(variant.audio_path)
+    _safe_unlink(variant.studio_voice_audio_path)
     db.delete(variant)
     db.commit()
     return {"ok": True}
