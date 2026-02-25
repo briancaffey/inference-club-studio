@@ -2442,6 +2442,12 @@ function exportAudio() {
   }
 }
 
+function exportAudioZip() {
+  if (import.meta.client) {
+    window.location.href = `${baseURL}/api/projects/${props.projectId}/export-zip`
+  }
+}
+
 async function transcribeSegment(segmentId: number, options: { silent?: boolean } = {}) {
   if (transcribing[segmentId]) return false
 
@@ -3909,29 +3915,39 @@ onUnmounted(() => {
       <CardHeader class="pb-3">
         <CardTitle class="text-base">Export</CardTitle>
       </CardHeader>
-      <CardContent class="grid gap-3 sm:grid-cols-4">
-        <div class="space-y-1">
-          <label class="text-xs text-muted-foreground">Format</label>
-          <select v-model="exportFormat" class="w-full rounded border bg-background px-2 py-1 text-sm">
-            <option value="wav">WAV</option>
-            <option value="mp3">MP3</option>
-          </select>
+      <CardContent class="space-y-3">
+        <div class="grid gap-3 sm:grid-cols-4">
+          <div class="space-y-1">
+            <label class="text-xs text-muted-foreground">Format</label>
+            <select v-model="exportFormat" class="w-full rounded border bg-background px-2 py-1 text-sm">
+              <option value="wav">WAV</option>
+              <option value="mp3">MP3</option>
+            </select>
+          </div>
+          <div class="space-y-1">
+            <label class="text-xs text-muted-foreground">Gap (ms)</label>
+            <Input v-model.number="exportGapMs" type="number" min="0" max="5000" />
+          </div>
+          <div class="space-y-1">
+            <label class="text-xs text-muted-foreground">Fade (ms)</label>
+            <Input v-model.number="exportFadeMs" type="number" min="0" max="500" />
+          </div>
+          <div class="flex items-end gap-2">
+            <label class="inline-flex items-center gap-2 text-sm">
+              <input v-model="exportNormalize" type="checkbox">
+              Normalize
+            </label>
+            <Button size="sm" :disabled="!hasAudio" @click="exportAudio">
+              Download Combined
+            </Button>
+          </div>
         </div>
-        <div class="space-y-1">
-          <label class="text-xs text-muted-foreground">Gap (ms)</label>
-          <Input v-model.number="exportGapMs" type="number" min="0" max="5000" />
-        </div>
-        <div class="space-y-1">
-          <label class="text-xs text-muted-foreground">Fade (ms)</label>
-          <Input v-model.number="exportFadeMs" type="number" min="0" max="500" />
-        </div>
-        <div class="flex items-end gap-2">
-          <label class="inline-flex items-center gap-2 text-sm">
-            <input v-model="exportNormalize" type="checkbox">
-            Normalize
-          </label>
-          <Button size="sm" :disabled="!hasAudio" @click="exportAudio">
-            Download
+        <div class="flex items-center justify-between border-t pt-3">
+          <p class="text-sm text-muted-foreground">
+            Download individual segment files as a zip archive
+          </p>
+          <Button size="sm" variant="outline" :disabled="!hasAudio" @click="exportAudioZip">
+            Download Zip
           </Button>
         </div>
       </CardContent>

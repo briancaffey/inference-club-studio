@@ -1,10 +1,12 @@
 import asyncio
+import io
 import json
 import logging
 import os
 import re
 import shutil
 import uuid
+import zipfile
 from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -2236,6 +2238,52 @@ async def api_export(
     return StreamingResponse(
         buffer,
         media_type=media_type,
+        headers={"Content-Disposition": f"attachment; filename={filename}"},
+    )
+
+
+@router.get("/api/projects/{project_id}/export-zip")
+async def api_export_zip(
+    project_id: uuid.UUID,
+    db: Session = Depends(get_db),
+):
+    project = _get_narration_project_or_404(project_id, db)
+    segments = _list_segments(project_id, db)
+
+    done_segments = [
+        segment
+        for segment in segments
+        if segment.status == "done"
+        and segment.audio_path
+        and os.path.exists(segment.audio_path)
+    ]
+    if not done_segments:
+        raise HTTPException(400, "No audio segments to export")
+
+    # Create zip file in memory
+    zip_buffer = io.BytesIO()
+    with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
+        for segment in done_segments:
+            audio_path = (
+                segment.studio_voice_audio_path
+                if (
+                    segment.studio_voice_audio_path
+                    and os.path.exists(segment.studio_voice_audio_path)
+                )
+                else segment.audio_path
+            )
+            if audio_path and os.path.exists(audio_path):
+                # Use position-based filename (1-indexed, zero-padded)
+                filename = f"{segment.position:03d}_{_safe_slug(segment.text[:30] or f'segment_{segment.position}')}.wav"
+                zip_file.write(audio_path, filename)
+
+    zip_buffer.seek(0)
+    slug = _safe_slug(project.name.replace(" ", "_").lower())
+    filename = f"narration_{slug}_segments.zip"
+
+    return StreamingResponse(
+        zip_buffer,
+        media_type="application/zip",
         headers={"Content-Disposition": f"attachment; filename={filename}"},
     )
 
