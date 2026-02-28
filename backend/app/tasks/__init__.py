@@ -14,4 +14,5 @@ from app.tasks.narration import (  # noqa: F401
     clean_project_studio_voice_task,
     generate_narration_segment_task,
 )
+from app.tasks.narration_images import generate_narration_image_series  # noqa: F401
 from app.tasks.takes import generate_video_take  # noqa: F401

@@ -1,5 +1,20 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { nextTick, ref, watch } from 'vue'
+import {
+  Carousel,
+  CarouselContent,
+  CarouselItem,
+  CarouselNext,
+  CarouselPrevious,
+  type CarouselApi,
+} from '~/components/ui/carousel'
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from '~/components/ui/dialog'
 import type {
   NarrationSegment,
   NarrationService,
@@ -35,6 +50,14 @@ const props = defineProps<{
   trimSelectionDuration: number
   trimAudioDuration: number
   trimSuggested: boolean
+  latestImagePreviewFrames: Array<{
+    id: string
+    step_order: number
+    step_key: string | null
+    prompt: string
+    src: string
+  }>
+  imagePanelOpen: boolean
 }>()
 
 const emit = defineEmits<{
@@ -64,9 +87,13 @@ const emit = defineEmits<{
   (event: 'trim-regenerate-waveform', segmentId: number): void
   (event: 'trim-retry-waveform', segmentId: number): void
   (event: 'trim-waveform-pointerdown', payload: PointerEvent, segmentId: number): void
+  (event: 'toggle-image-panel', segmentId: number): void
 }>()
 
 const actionMenuValue = ref('')
+const lightboxOpen = ref(false)
+const lightboxStartIndex = ref(0)
+const lightboxApi = ref<CarouselApi | null>(null)
 
 function onEditInput(event: Event) {
   const target = event.target as HTMLTextAreaElement
@@ -108,6 +135,48 @@ function studioVoiceStatusLabel(status: string) {
   if (status === 'error') return 'Error'
   return 'Not cleaned'
 }
+
+function previewStepLabel(frame: { step_key: string | null, step_order: number }) {
+  return frame.step_key || `step_${frame.step_order}`
+}
+
+function syncLightboxPosition() {
+  nextTick(() => {
+    if (!lightboxApi.value) return
+    lightboxApi.value.scrollTo(lightboxStartIndex.value, true)
+  })
+}
+
+function openLightboxAt(index: number) {
+  lightboxStartIndex.value = index
+  lightboxOpen.value = true
+  syncLightboxPosition()
+}
+
+function onLightboxInit(api: CarouselApi) {
+  lightboxApi.value = api
+  syncLightboxPosition()
+}
+
+watch(lightboxOpen, open => {
+  if (open) {
+    syncLightboxPosition()
+  }
+})
+
+watch(
+  () => props.latestImagePreviewFrames.length,
+  length => {
+    if (!length) {
+      lightboxOpen.value = false
+      lightboxStartIndex.value = 0
+      return
+    }
+    if (lightboxStartIndex.value >= length) {
+      lightboxStartIndex.value = 0
+    }
+  },
+)
 </script>
 
 <template>
@@ -169,6 +238,13 @@ function studioVoiceStatusLabel(status: string) {
       <button class="rounded-md border border-red-300 px-3 py-1.5 text-xs text-red-700 hover:bg-red-50 dark:border-red-900 dark:text-red-300" @click="emit('delete', segment.id)">Delete</button>
       <button data-testid="generate" class="rounded-md bg-primary px-3 py-1.5 text-xs text-primary-foreground disabled:opacity-50" :disabled="generating" @click="emit('generate', segment.id)">Generate</button>
       <button class="rounded-md border px-3 py-1.5 text-xs hover:bg-muted disabled:opacity-50" :disabled="generating" @click="emit('regenerate', segment.id)">Regenerate</button>
+      <button
+        data-testid="toggle-image-panel"
+        class="rounded-md border px-3 py-1.5 text-xs hover:bg-muted"
+        @click="emit('toggle-image-panel', segment.id)"
+      >
+        {{ imagePanelOpen ? 'Hide Images' : 'Images' }}
+      </button>
 
       <button class="rounded-md border px-3 py-1.5 text-xs hover:bg-muted" @click="emit('toggle-final', segment)">
         {{ segment.is_final ? 'Unmark Final' : 'Mark Final' }}
@@ -226,6 +302,90 @@ function studioVoiceStatusLabel(status: string) {
         <audio :src="cleanedAudioUrl" controls preload="none" class="w-full" />
       </div>
     </div>
+
+    <section
+      v-if="latestImagePreviewFrames.length"
+      class="space-y-2 rounded-xl border bg-muted/20 p-3"
+    >
+      <div class="flex items-center justify-between gap-2">
+        <p class="text-xs font-medium text-muted-foreground">
+          Latest Image Sequence
+        </p>
+        <span class="text-[11px] text-muted-foreground">
+          {{ latestImagePreviewFrames.length }} frame{{ latestImagePreviewFrames.length === 1 ? '' : 's' }}
+        </span>
+      </div>
+
+      <div class="grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
+        <button
+          v-for="(frame, index) in latestImagePreviewFrames"
+          :key="frame.id"
+          type="button"
+          data-testid="segment-image-preview"
+          class="group space-y-1 text-left"
+          @click="openLightboxAt(index)"
+        >
+          <div class="aspect-video overflow-hidden rounded-lg border bg-muted/40">
+            <img
+              :src="frame.src"
+              :alt="`Sequence frame ${frame.step_order}`"
+              class="h-full w-full object-cover transition-transform duration-200 group-hover:scale-[1.03]"
+            >
+          </div>
+          <p class="line-clamp-1 text-[11px] text-muted-foreground">
+            {{ previewStepLabel(frame) }}
+          </p>
+        </button>
+      </div>
+
+      <Dialog v-model:open="lightboxOpen">
+        <DialogContent
+          data-testid="segment-image-lightbox"
+          class="!w-[86vw] !max-w-[86vw] sm:!max-w-[86vw]"
+        >
+          <DialogHeader>
+            <DialogTitle>Latest Image Sequence</DialogTitle>
+            <DialogDescription>
+              Use arrows to browse. Carousel loops continuously.
+            </DialogDescription>
+          </DialogHeader>
+
+          <Carousel
+            :opts="{ loop: true, duration: 0, startIndex: lightboxStartIndex }"
+            @init-api="onLightboxInit"
+          >
+            <CarouselContent class="!-ml-0">
+              <CarouselItem
+                v-for="frame in latestImagePreviewFrames"
+                :key="`lightbox-${frame.id}`"
+                class="!pl-0"
+              >
+                <div class="space-y-2">
+                  <div class="flex max-h-[68vh] min-h-[360px] items-center justify-center rounded-xl border bg-muted/30 p-2">
+                    <img
+                      :src="frame.src"
+                      :alt="`Sequence frame ${frame.step_order}`"
+                      class="max-h-[64vh] w-full rounded object-contain"
+                    >
+                  </div>
+                  <div class="space-y-1">
+                    <p class="text-xs font-medium text-muted-foreground">
+                      {{ previewStepLabel(frame) }}
+                    </p>
+                    <p class="text-sm leading-relaxed">
+                      {{ frame.prompt }}
+                    </p>
+                  </div>
+                </div>
+              </CarouselItem>
+            </CarouselContent>
+
+            <CarouselPrevious class="left-2" />
+            <CarouselNext class="right-2" />
+          </Carousel>
+        </DialogContent>
+      </Dialog>
+    </section>
 
     <NarrationTrimPanel
       v-if="trimOpen"

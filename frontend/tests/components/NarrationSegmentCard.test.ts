@@ -70,6 +70,8 @@ const baseProps = {
   trimSelectionDuration: 0,
   trimAudioDuration: 1000,
   trimSuggested: false,
+  latestImagePreviewFrames: [],
+  imagePanelOpen: false,
 }
 
 describe('NarrationSegmentCard', () => {
@@ -123,5 +125,41 @@ describe('NarrationSegmentCard', () => {
     await wrapper.get('[data-testid="segment-action-menu"]').setValue('trim')
 
     expect(wrapper.emitted('toggle-trim')?.[0]).toEqual([segment.id])
+  })
+
+  it('emits toggle-image-panel when image button is clicked', async () => {
+    const wrapper = mount(NarrationSegmentCard, {
+      props: baseProps,
+    })
+
+    await wrapper.get('[data-testid="toggle-image-panel"]').trigger('click')
+    expect(wrapper.emitted('toggle-image-panel')?.[0]).toEqual([segment.id])
+  })
+
+  it('renders latest image sequence previews when present', () => {
+    const wrapper = mount(NarrationSegmentCard, {
+      props: {
+        ...baseProps,
+        latestImagePreviewFrames: [
+          {
+            id: 'frame-1',
+            step_order: 1,
+            step_key: 'step_1',
+            prompt: 'A student in a classroom',
+            src: '/images/frame-1.png',
+          },
+          {
+            id: 'frame-2',
+            step_order: 2,
+            step_key: 'step_2',
+            prompt: 'The student is using a laptop',
+            src: '/images/frame-2.png',
+          },
+        ],
+      },
+    })
+
+    expect(wrapper.text()).toContain('Latest Image Sequence')
+    expect(wrapper.findAll('[data-testid="segment-image-preview"]').length).toBe(2)
   })
 })

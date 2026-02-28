@@ -413,6 +413,64 @@ class InvokeAIClient:
             "priority": 0,
         }
 
+    def _build_text_to_image_batch(
+        self,
+        prompt: str,
+        width: int,
+        height: int,
+        num_steps: int,
+        cfg_scale: float,
+        seed: int,
+    ) -> dict:
+        """Build an enqueue_batch payload for pure text-to-image generation."""
+        graph = copy.deepcopy(_REF_IMG_GRAPH)
+
+        graph["nodes"][_REF_PROMPT_NODE]["value"] = prompt
+        graph["nodes"][_REF_SEED_NODE]["value"] = seed
+        graph["nodes"][_REF_DENOISE_NODE]["width"] = width
+        graph["nodes"][_REF_DENOISE_NODE]["height"] = height
+        graph["nodes"][_REF_DENOISE_NODE]["num_steps"] = num_steps
+        if cfg_scale != 1.0:
+            logger.warning(
+                "cfg_scale=%.1f ignored — FLUX 2 Klein requires 1.0 "
+                "without negative conditioning. Using 1.0.",
+                cfg_scale,
+            )
+        graph["nodes"][_REF_DENOISE_NODE]["cfg_scale"] = 1.0
+        graph["nodes"][_REF_METADATA_NODE]["width"] = width
+        graph["nodes"][_REF_METADATA_NODE]["height"] = height
+        graph["nodes"][_REF_METADATA_NODE]["steps"] = num_steps
+        graph["nodes"][_REF_METADATA_NODE]["ref_images"] = []
+
+        # Remove Kontext-specific nodes/edges for txt2img runs.
+        graph["nodes"].pop(_REF_KONTEXT_NODE, None)
+        graph["nodes"].pop(_REF_KONTEXT_COLLECT_NODE, None)
+        graph["edges"] = [
+            edge
+            for edge in graph["edges"]
+            if edge["source"]["node_id"]
+            not in {_REF_KONTEXT_NODE, _REF_KONTEXT_COLLECT_NODE}
+            and edge["destination"]["node_id"]
+            not in {_REF_KONTEXT_NODE, _REF_KONTEXT_COLLECT_NODE}
+            and not (
+                edge["destination"]["node_id"] == _REF_DENOISE_NODE
+                and edge["destination"]["field"] == "kontext_conditioning"
+            )
+        ]
+
+        if self.board_id:
+            graph["nodes"][_REF_OUTPUT_NODE]["board"] = {"board_id": self.board_id}
+
+        return {
+            "queue_id": "default",
+            "batch": {
+                "data": [],
+                "graph": graph,
+                "runs": 1,
+            },
+            "priority": 0,
+        }
+
     async def upload_image(
         self, image_bytes: bytes, filename: str = "reference.png"
     ) -> str:
@@ -468,6 +526,39 @@ class InvokeAIClient:
 
         batch_payload = self._build_ref_img_batch(
             prompt, ref_image_name, width, height, num_steps, cfg_scale, seed
+        )
+        batch_info = await self._submit_batch(batch_payload)
+        image_name = await self._poll_for_result(batch_info)
+        image_bytes = await self._download_image(image_name)
+
+        return GeneratedImage(
+            image_name=image_name,
+            image_bytes=image_bytes,
+            width=width,
+            height=height,
+            seed=seed,
+        )
+
+    async def generate_text_to_image(
+        self,
+        prompt: str,
+        width: int = 1024,
+        height: int = 1024,
+        num_steps: int = 16,
+        cfg_scale: float = 1.0,
+        seed: int = -1,
+    ) -> GeneratedImage:
+        """Generate an image from text only (no reference image)."""
+        if seed < 0:
+            seed = random.randint(0, 2**32 - 1)
+
+        batch_payload = self._build_text_to_image_batch(
+            prompt=prompt,
+            width=width,
+            height=height,
+            num_steps=num_steps,
+            cfg_scale=cfg_scale,
+            seed=seed,
         )
         batch_info = await self._submit_batch(batch_payload)
         image_name = await self._poll_for_result(batch_info)

@@ -7,6 +7,16 @@ from app.schemas.cut_ai import (  # noqa: F401
     FluxPromptDraftResponse,
 )
 from app.schemas.generation import GenerationCreate, GenerationRead  # noqa: F401
+from app.schemas.narration_image import (  # noqa: F401
+    NarrationImageFrameCreate,
+    NarrationImageFrameRead,
+    NarrationImagePromptSuggestionRequest,
+    NarrationImagePromptSuggestionResponse,
+    NarrationImageRegenerateRequest,
+    NarrationImageSeriesAutoCreate,
+    NarrationImageSeriesCreate,
+    NarrationImageSeriesRead,
+)
 from app.schemas.project import (  # noqa: F401
     ProjectCreate,
     ProjectDetail,

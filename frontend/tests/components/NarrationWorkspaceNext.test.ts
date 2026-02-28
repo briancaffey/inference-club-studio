@@ -38,6 +38,7 @@ const transcribeAll = vi.fn()
 const cancelGeneration = vi.fn()
 const importScript = vi.fn()
 const addSegment = vi.fn()
+const togglePanel = vi.fn()
 
 const mockTrim = {
   expandedTrimSegmentId: ref<number | null>(null),
@@ -161,11 +162,40 @@ const mockWorkspace = {
   resolveSegmentDisplayStatus: vi.fn(() => 'pending'),
 }
 
+const mockImageSequences = {
+  mediaUrl: vi.fn((path: string | null) => path),
+  isPanelOpen: vi.fn(() => false),
+  openPanel: vi.fn(),
+  closePanel: vi.fn(),
+  togglePanel,
+  ensureSegmentLoaded: vi.fn(async () => {}),
+  clearSegment: vi.fn(),
+  clearAll: vi.fn(),
+  listForSegment: vi.fn(() => []),
+  latestPreviewFrames: vi.fn(() => []),
+  isLoadingSegment: vi.fn(() => false),
+  segmentError: vi.fn(() => null),
+  isCreatingSegment: vi.fn(() => false),
+  isSeriesBusy: vi.fn(() => false),
+  isSeriesSuggesting: vi.fn(() => false),
+  refreshSegment: vi.fn(),
+  createManualSeries: vi.fn(),
+  createAutoSeries: vi.fn(),
+  queueSeries: vi.fn(),
+  deleteSeries: vi.fn(),
+  addFrame: vi.fn(),
+  regenerateFrame: vi.fn(),
+  suggestPrompts: vi.fn(async () => []),
+}
+
 vi.mock('~/composables/narration-next/useNarrationWorkspaceNext', () => ({
   useNarrationWorkspaceNext: vi.fn(() => mockWorkspace),
 }))
 vi.mock('~/composables/narration-next/useNarrationTrimNext', () => ({
   useNarrationTrimNext: vi.fn(() => mockTrim),
+}))
+vi.mock('~/composables/narration-next/useNarrationImageSequences', () => ({
+  useNarrationImageSequences: vi.fn(() => mockImageSequences),
 }))
 
 describe('NarrationWorkspaceNext', () => {
@@ -176,6 +206,10 @@ describe('NarrationWorkspaceNext', () => {
     cancelGeneration.mockReset()
     importScript.mockReset()
     addSegment.mockReset()
+    togglePanel.mockReset()
+    mockImageSequences.ensureSegmentLoaded.mockReset()
+    mockImageSequences.latestPreviewFrames.mockReset()
+    mockImageSequences.latestPreviewFrames.mockReturnValue([])
 
     mockWorkspace.showImport.value = false
     mockWorkspace.showAdd.value = false
@@ -204,6 +238,23 @@ describe('NarrationWorkspaceNext', () => {
     expect(generateAll).toHaveBeenCalledTimes(1)
     expect(retryFailed).toHaveBeenCalledTimes(1)
     expect(transcribeAll).toHaveBeenCalledTimes(1)
+  })
+
+  it('wires image panel toggle to image sequence controller', async () => {
+    const wrapper = mount(NarrationWorkspaceNext, {
+      props: { projectId: 'project-1' },
+    })
+
+    await wrapper.get('[data-testid="toggle-image-panel"]').trigger('click')
+    expect(togglePanel).toHaveBeenCalledWith(sampleSegment.id)
+  })
+
+  it('prefetches image sequences for visible segments', () => {
+    mount(NarrationWorkspaceNext, {
+      props: { projectId: 'project-1' },
+    })
+
+    expect(mockImageSequences.ensureSegmentLoaded).toHaveBeenCalledWith(sampleSegment.id)
   })
 
   it('opens import and add panels and triggers actions', async () => {

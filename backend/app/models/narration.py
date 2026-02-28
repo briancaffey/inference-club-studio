@@ -18,6 +18,7 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.database import Base
 
 if TYPE_CHECKING:
+    from app.models.narration_image import NarrationImageSeries
     from app.models.project import Project
 
 
@@ -104,6 +105,11 @@ class NarrationSegment(Base):
     )
     voice_sample: Mapped["NarrationVoiceSample | None"] = relationship(
         back_populates="segments",
+    )
+    image_series: Mapped[list["NarrationImageSeries"]] = relationship(
+        back_populates="segment",
+        cascade="all, delete-orphan",
+        order_by="NarrationImageSeries.created_at.desc()",
     )
 
 

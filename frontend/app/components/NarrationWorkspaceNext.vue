@@ -1,12 +1,14 @@
 <script setup lang="ts">
-import { computed, nextTick, ref, toRef } from 'vue'
+import { computed, nextTick, ref, toRef, watch } from 'vue'
 import { Mic2 } from 'lucide-vue-next'
 import type { NarrationSegment } from '~/types'
 import NarrationStatusBanner from '~/components/narration-next/NarrationStatusBanner.vue'
 import NarrationToolbar from '~/components/narration-next/NarrationToolbar.vue'
 import NarrationTimeline from '~/components/narration-next/NarrationTimeline.vue'
 import NarrationSegmentCard from '~/components/narration-next/NarrationSegmentCard.vue'
+import NarrationImageSequencePanel from '~/components/narration-next/NarrationImageSequencePanel.vue'
 import { useNarrationWorkspaceNext } from '~/composables/narration-next/useNarrationWorkspaceNext'
+import { useNarrationImageSequences } from '~/composables/narration-next/useNarrationImageSequences'
 import { useNarrationTrimNext } from '~/composables/narration-next/useNarrationTrimNext'
 
 const props = defineProps<{
@@ -14,6 +16,7 @@ const props = defineProps<{
 }>()
 
 const workspace = useNarrationWorkspaceNext(toRef(props, 'projectId'))
+const imageSequences = useNarrationImageSequences(toRef(props, 'projectId'))
 
 const timelineRef = ref<{ seekToWord: (segmentId: number, startSeconds: number) => void } | null>(null)
 const playbackSpeed = ref(1)
@@ -36,7 +39,7 @@ const transcribeAllLabel = computed(() => {
   return `Transcribing ${progress.done}/${progress.total}`
 })
 
-function clearAllWithConfirm() {
+async function clearAllWithConfirm() {
   if (!confirmClear.value) {
     confirmClear.value = true
     setTimeout(() => {
@@ -46,12 +49,15 @@ function clearAllWithConfirm() {
   }
 
   confirmClear.value = false
-  void workspace.clearAllSegments()
+  await workspace.clearAllSegments()
+  imageSequences.clearAll()
 }
 
-function deleteSegmentWithConfirm(segmentId: number) {
+async function deleteSegmentWithConfirm(segmentId: number) {
   if (!confirm('Delete this segment?')) return
-  void workspace.deleteSegment(segmentId)
+  imageSequences.closePanel(segmentId)
+  await workspace.deleteSegment(segmentId)
+  imageSequences.clearSegment(segmentId)
 }
 
 function onSeekWord(segmentId: number, startSeconds: number) {
@@ -144,6 +150,35 @@ function onTrimRegenerate(segmentId: number) {
 function onTrimRetry(segmentId: number) {
   void trim.loadTrimWaveform(segmentId)
 }
+
+function onToggleImagePanel(segmentId: number) {
+  void imageSequences.togglePanel(segmentId)
+}
+
+function segmentImagePreviewFrames(segmentId: number) {
+  const previews = imageSequences.latestPreviewFrames(segmentId).map(frame => {
+    const src = imageSequences.mediaUrl(frame.output_image_path)
+    if (!src) return null
+    return {
+      id: frame.id,
+      step_order: frame.step_order,
+      step_key: frame.step_key,
+      prompt: frame.prompt,
+      src,
+    }
+  })
+  return previews.filter((item): item is NonNullable<typeof item> => !!item)
+}
+
+watch(
+  () => workspace.filteredSegments.value.map(segment => segment.id),
+  segmentIds => {
+    for (const segmentId of segmentIds) {
+      void imageSequences.ensureSegmentLoaded(segmentId)
+    }
+  },
+  { immediate: true },
+)
 </script>
 
 <template>
@@ -322,63 +357,76 @@ function onTrimRetry(segmentId: number) {
         No segments match the current filters.
       </div>
 
-      <NarrationSegmentCard
+      <div
         v-for="segment in workspace.filteredSegments.value"
         :key="segment.id"
-        :segment="segment"
-        :display-status="workspace.resolveSegmentDisplayStatus(segment, workspace.queuedSegmentIds)"
-        :editing="workspace.editingId.value === segment.id"
-        :edit-text="workspace.editText.value"
-        :regen-text="workspace.regenText[segment.id] || ''"
-        :transcribing="!!workspace.transcribing[segment.id]"
-        :transcription="workspace.transcriptions[segment.id] || null"
-        :expanded-transcript="workspace.expandedTranscript.value === segment.id"
-        :generating="workspace.generating.value"
-        :audio-url="workspace.segmentAudioUrl(segment.id)"
-        :cleaned-audio-url="segment.studio_voice_audio_path ? workspace.segmentCleanedAudioUrl(segment.id) : null"
-        :active-word-idx="-1"
-        :can-trim="trim.segmentHasTrimmableAudio(segment)"
-        :trim-open="trim.expandedTrimSegmentId.value === segment.id"
-        :trim-range-label="trim.trimRangeLabel.value"
-        :trim-selection-armed="trim.trimSelectionArmed.value"
-        :trim-waveform-loading="trim.trimWaveformLoading.value && trim.expandedTrimSegmentId.value === segment.id"
-        :trim-waveform-error="trim.trimWaveformError.value"
-        :has-trim-selection="trim.hasTrimSelection.value"
-        :trim-applying="trim.trimApplying.value"
-        :can-preview-trim="!!trim.trimDecodedBuffer.value"
-        :trim-waveform-ready="!!trim.trimWaveformData.value && trim.trimSegmentId.value === segment.id"
-        :trim-selection-start="trim.trimSelectionStart.value"
-        :trim-selection-end="trim.trimSelectionEnd.value"
-        :trim-selection-duration="trim.trimSelectionDuration.value"
-        :trim-audio-duration="trim.trimAudioDuration.value"
-        :trim-suggested="trim.segmentNeedsTrim(segment)"
-        @start-edit="workspace.startEdit"
-        @update:edit-text="workspace.editText.value = $event"
-        @save-edit="onSaveEdit"
-        @cancel-edit="workspace.cancelEdit"
-        @delete="deleteSegmentWithConfirm"
-        @move="onMove"
-        @update-service="onUpdateService"
-        @generate="onGenerate"
-        @regenerate="onRegenerate"
-        @update:regen-text="workspace.regenText[segment.id] = $event"
-        @transcribe="onTranscribe"
-        @toggle-transcript="workspace.toggleTranscript"
-        @delete-transcription="onDeleteTranscription"
-        @seek-word="onSeekWord"
-        @toggle-final="toggleFinal"
-        @clear-needs-review="clearNeedsReview"
-        @mark-done="markDone"
-        @toggle-trim="onToggleTrim"
-        @trim-begin-selection="trim.beginTrimSelection"
-        @trim-preview="onTrimPreview"
-        @trim-apply="onTrimApply"
-        @trim-clear-selection="trim.clearTrimSelection"
-        @trim-cancel="trim.cancelTrimDeadspace"
-        @trim-regenerate-waveform="onTrimRegenerate"
-        @trim-retry-waveform="onTrimRetry"
-        @trim-waveform-pointerdown="trim.onTrimWaveformPointerDown"
-      />
+        class="space-y-3"
+      >
+        <NarrationSegmentCard
+          :segment="segment"
+          :display-status="workspace.resolveSegmentDisplayStatus(segment, workspace.queuedSegmentIds)"
+          :editing="workspace.editingId.value === segment.id"
+          :edit-text="workspace.editText.value"
+          :regen-text="workspace.regenText[segment.id] || ''"
+          :transcribing="!!workspace.transcribing[segment.id]"
+          :transcription="workspace.transcriptions[segment.id] || null"
+          :expanded-transcript="workspace.expandedTranscript.value === segment.id"
+          :generating="workspace.generating.value"
+          :audio-url="workspace.segmentAudioUrl(segment.id)"
+          :cleaned-audio-url="segment.studio_voice_audio_path ? workspace.segmentCleanedAudioUrl(segment.id) : null"
+          :active-word-idx="-1"
+          :can-trim="trim.segmentHasTrimmableAudio(segment)"
+          :trim-open="trim.expandedTrimSegmentId.value === segment.id"
+          :trim-range-label="trim.trimRangeLabel.value"
+          :trim-selection-armed="trim.trimSelectionArmed.value"
+          :trim-waveform-loading="trim.trimWaveformLoading.value && trim.expandedTrimSegmentId.value === segment.id"
+          :trim-waveform-error="trim.trimWaveformError.value"
+          :has-trim-selection="trim.hasTrimSelection.value"
+          :trim-applying="trim.trimApplying.value"
+          :can-preview-trim="!!trim.trimDecodedBuffer.value"
+          :trim-waveform-ready="!!trim.trimWaveformData.value && trim.trimSegmentId.value === segment.id"
+          :trim-selection-start="trim.trimSelectionStart.value"
+          :trim-selection-end="trim.trimSelectionEnd.value"
+          :trim-selection-duration="trim.trimSelectionDuration.value"
+          :trim-audio-duration="trim.trimAudioDuration.value"
+          :trim-suggested="trim.segmentNeedsTrim(segment)"
+          :latest-image-preview-frames="segmentImagePreviewFrames(segment.id)"
+          :image-panel-open="imageSequences.isPanelOpen(segment.id)"
+          @start-edit="workspace.startEdit"
+          @update:edit-text="workspace.editText.value = $event"
+          @save-edit="onSaveEdit"
+          @cancel-edit="workspace.cancelEdit"
+          @delete="deleteSegmentWithConfirm"
+          @move="onMove"
+          @update-service="onUpdateService"
+          @generate="onGenerate"
+          @regenerate="onRegenerate"
+          @update:regen-text="workspace.regenText[segment.id] = $event"
+          @transcribe="onTranscribe"
+          @toggle-transcript="workspace.toggleTranscript"
+          @delete-transcription="onDeleteTranscription"
+          @seek-word="onSeekWord"
+          @toggle-final="toggleFinal"
+          @clear-needs-review="clearNeedsReview"
+          @mark-done="markDone"
+          @toggle-trim="onToggleTrim"
+          @trim-begin-selection="trim.beginTrimSelection"
+          @trim-preview="onTrimPreview"
+          @trim-apply="onTrimApply"
+          @trim-clear-selection="trim.clearTrimSelection"
+          @trim-cancel="trim.cancelTrimDeadspace"
+          @trim-regenerate-waveform="onTrimRegenerate"
+          @trim-retry-waveform="onTrimRetry"
+          @trim-waveform-pointerdown="trim.onTrimWaveformPointerDown"
+          @toggle-image-panel="onToggleImagePanel"
+        />
+
+        <NarrationImageSequencePanel
+          v-if="imageSequences.isPanelOpen(segment.id)"
+          :segment="segment"
+          :controller="imageSequences"
+        />
+      </div>
     </div>
   </div>
 </template>

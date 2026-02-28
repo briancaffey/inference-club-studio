@@ -1,4 +1,4 @@
-.PHONY: build up down logs shell test lint format migrate migration restart
+.PHONY: build up down logs shell test lint format migrate migration restart logs-image-worker
 
 build:
 	docker compose build
@@ -23,6 +23,9 @@ logs-worker:
 
 logs-dia-worker:
 	docker compose logs -f celery-dia-worker
+
+logs-image-worker:
+	docker compose logs -f celery-image-worker
 
 logs-migrate:
 	docker compose logs migrate

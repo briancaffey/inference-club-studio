@@ -268,3 +268,62 @@ export interface NarrationSegmentSplitResult {
   created_count: number
   segments: NarrationSegment[]
 }
+
+export type NarrationImageSeriesStatus =
+  | 'draft'
+  | 'queued'
+  | 'generating'
+  | 'completed'
+  | 'error'
+
+export type NarrationImageFrameStatus =
+  | 'pending'
+  | 'generating'
+  | 'completed'
+  | 'error'
+
+export type NarrationImageGenerationMode = 'text_to_image' | 'image_to_image'
+
+export interface NarrationImageFrame {
+  id: string
+  series_id: string
+  parent_frame_id: string | null
+  step_key: string | null
+  step_order: number
+  is_fork: boolean
+  prompt: string
+  mode: NarrationImageGenerationMode | string
+  status: NarrationImageFrameStatus | string
+  width: number
+  height: number
+  num_steps: number
+  cfg_scale: number
+  seed: number
+  invokeai_reference_image_name: string | null
+  invokeai_generated_image_name: string | null
+  actual_seed: number | null
+  output_image_path: string | null
+  error_message: string | null
+  created_at: string
+  updated_at: string
+}
+
+export interface NarrationImageSeries {
+  id: string
+  segment_id: number
+  name: string | null
+  source_prompt: string | null
+  plan_json: Record<string, unknown> | null
+  status: NarrationImageSeriesStatus | string
+  error_message: string | null
+  queued_at: string | null
+  started_at: string | null
+  completed_at: string | null
+  created_at: string
+  updated_at: string
+  frames: NarrationImageFrame[]
+}
+
+export interface NarrationImagePromptSuggestionResponse {
+  suggestions: string[]
+}

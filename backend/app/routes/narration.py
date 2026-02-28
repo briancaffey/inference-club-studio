@@ -1264,6 +1264,16 @@ async def api_delete_segment(segment_id: int, db: Session = Depends(get_db)):
         _safe_unlink(variant.audio_path)
         _safe_unlink(variant.studio_voice_audio_path)
 
+    image_series_dir = (
+        Path(settings.media_dir)
+        / str(segment.project_id)
+        / "narration"
+        / "image_series"
+        / str(segment.id)
+    )
+    if image_series_dir.exists():
+        shutil.rmtree(image_series_dir, ignore_errors=True)
+
     db.delete(segment)
     db.commit()
     return {"ok": True}

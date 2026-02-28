@@ -17,6 +17,9 @@ celery.conf.update(
     task_routes={
         "app.tasks.narration.generate_narration_segment_task": {"queue": "dia"},
         "app.tasks.narration.clean_project_studio_voice_task": {"queue": "dia"},
+        "app.tasks.narration_images.generate_narration_image_series": {
+            "queue": "image-sequences"
+        },
     },
 )
 
