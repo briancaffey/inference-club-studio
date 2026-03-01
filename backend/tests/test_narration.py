@@ -1,10 +1,19 @@
 import wave
+import io
+import zipfile
 from types import SimpleNamespace
 
 from app.models.narration import (
     NarrationSegment,
     NarrationTranscription,
     NarrationVariant,
+)
+from app.models.narration_image import (
+    NarrationImageFrame,
+    NarrationImageFrameStatus,
+    NarrationImageGenerationMode,
+    NarrationImageSeries,
+    NarrationImageSeriesStatus,
 )
 from app.models.project import Project
 from app.routes import narration
@@ -206,6 +215,104 @@ def _wav_duration_ms(path: str) -> int:
         sample_rate = handle.getframerate()
         frames = handle.getnframes()
     return round((frames / sample_rate) * 1000)
+
+
+def _write_test_png(path: str) -> None:
+    with open(path, "wb") as handle:
+        handle.write(b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR")
+
+
+def test_export_timeline_metadata_and_images_zip(client, db, tmp_path):
+    project = _make_narration_project(db)
+
+    seg_1_payload = client.post(
+        f"/api/projects/{project.id}/segments",
+        json={"text": "Segment one with images", "service": "dia"},
+    ).json()
+    seg_2_payload = client.post(
+        f"/api/projects/{project.id}/segments",
+        json={"text": "Segment two without images", "service": "dia"},
+    ).json()
+
+    seg_1 = (
+        db.query(NarrationSegment)
+        .filter(NarrationSegment.id == seg_1_payload["id"])
+        .first()
+    )
+    seg_2 = (
+        db.query(NarrationSegment)
+        .filter(NarrationSegment.id == seg_2_payload["id"])
+        .first()
+    )
+    assert seg_1 is not None
+    assert seg_2 is not None
+
+    audio_1 = tmp_path / "seg1.wav"
+    audio_2 = tmp_path / "seg2.wav"
+    _write_test_wav(str(audio_1), duration_ms=3000)
+    _write_test_wav(str(audio_2), duration_ms=2000)
+
+    seg_1.status = "done"
+    seg_1.audio_path = str(audio_1)
+    seg_2.status = "done"
+    seg_2.audio_path = str(audio_2)
+
+    series = NarrationImageSeries(
+        segment_id=seg_1.id,
+        status=NarrationImageSeriesStatus.COMPLETED.value,
+    )
+    db.add(series)
+    db.flush()
+
+    for index in range(3):
+        image_path = tmp_path / f"seg1_img_{index + 1}.png"
+        _write_test_png(str(image_path))
+        db.add(
+            NarrationImageFrame(
+                series_id=series.id,
+                step_order=index + 1,
+                prompt=f"Frame {index + 1}",
+                mode=NarrationImageGenerationMode.TEXT_TO_IMAGE.value,
+                status=NarrationImageFrameStatus.COMPLETED.value,
+                output_image_path=str(image_path),
+            )
+        )
+
+    db.commit()
+
+    metadata_resp = client.get(
+        f"/api/projects/{project.id}/export-timeline-metadata?fps=24"
+    )
+    assert metadata_resp.status_code == 200
+    metadata = metadata_resp.json()
+    assert metadata["audio_channel"] == 3
+    assert metadata["image_channel"] == 4
+    assert metadata["audio_volume"] == 1.9
+    assert metadata["fps"] == 24
+
+    segments = metadata["segments"]
+    assert len(segments) == 2
+
+    first = segments[0]
+    assert first["segment_id"] == seg_1.id
+    assert first["audio"]["start_frame"] == 1
+    assert first["audio"]["end_frame_exclusive"] == 73
+    assert first["audio"]["frame_count"] == 72
+    assert [item["start_frame"] for item in first["images"]] == [1, 25, 49]
+    assert [item["end_frame_exclusive"] for item in first["images"]] == [25, 49, 73]
+
+    second = segments[1]
+    assert second["segment_id"] == seg_2.id
+    assert second["audio"]["start_frame"] == 73
+    assert second["audio"]["end_frame_exclusive"] == 121
+    assert second["images"] == []
+
+    images_zip_resp = client.get(f"/api/projects/{project.id}/export-images-zip")
+    assert images_zip_resp.status_code == 200
+
+    with zipfile.ZipFile(io.BytesIO(images_zip_resp.content), "r") as archive:
+        names = sorted(archive.namelist())
+    assert names == sorted(item["filename"] for item in first["images"])
 
 
 def test_trim_segment_remove_mode_cuts_selected_range(

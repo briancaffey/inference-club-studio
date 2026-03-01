@@ -40,6 +40,11 @@ from app.models.narration import (
     NarrationVariant,
     NarrationVoiceSample,
 )
+from app.models.narration_image import (
+    NarrationImageFrame,
+    NarrationImageFrameStatus,
+    NarrationImageSeries,
+)
 from app.models.project import Project, ProjectType
 from app.services.narration.audio import (
     concatenate_segments,
@@ -2200,6 +2205,173 @@ async def api_status():
     }
 
 
+@dataclass
+class _TimelineExportArtifacts:
+    payload: dict
+    audio_files: list[tuple[str, str]]
+    image_files: list[tuple[str, str]]
+
+
+def _preferred_export_audio_path(segment: NarrationSegment, db: Session) -> str | None:
+    cleaned = _resolve_existing_segment_cleaned_audio_path(segment, db, persist=False)
+    if cleaned and os.path.exists(cleaned):
+        return cleaned
+    original = _resolve_existing_segment_audio_path(segment, db, persist=False)
+    if original and os.path.exists(original):
+        return original
+    return None
+
+
+def _audio_export_filename(segment: NarrationSegment) -> str:
+    return (
+        f"{segment.position:03d}_"
+        f"{_safe_slug(segment.text[:30] or f'segment_{segment.position}')}.wav"
+    )
+
+
+def _image_export_filename(
+    segment: NarrationSegment,
+    frame: NarrationImageFrame,
+    index: int,
+) -> str:
+    suffix = Path(frame.output_image_path or "").suffix.lower() or ".png"
+    frame_token = _safe_slug(frame.step_key or str(frame.id))
+    return (
+        f"{segment.position:03d}/"
+        f"{index:03d}_{frame_token}{suffix}"
+    )
+
+
+def _latest_sequence_frames_for_segment(
+    segment: NarrationSegment,
+) -> tuple[NarrationImageSeries | None, list[NarrationImageFrame]]:
+    candidates = sorted(
+        segment.image_series,
+        key=lambda item: item.completed_at or item.updated_at or item.created_at,
+        reverse=True,
+    )
+    for series in candidates:
+        frames = [
+            frame
+            for frame in sorted(
+                series.frames,
+                key=lambda item: (item.step_order, item.created_at),
+            )
+            if frame.status == NarrationImageFrameStatus.COMPLETED.value
+            and frame.output_image_path
+            and os.path.exists(frame.output_image_path)
+        ]
+        if frames:
+            return series, frames
+    return None, []
+
+
+def _build_timeline_export_artifacts(
+    *,
+    project: Project,
+    db: Session,
+    fps: int,
+) -> _TimelineExportArtifacts:
+    segments = _list_segments(project.id, db)
+    done_segments = [segment for segment in segments if segment.status == "done"]
+
+    exported_segments: list[dict] = []
+    audio_files: list[tuple[str, str]] = []
+    image_files: list[tuple[str, str]] = []
+
+    current_frame = 1
+    for segment in done_segments:
+        audio_path = _preferred_export_audio_path(segment, db)
+        if not audio_path:
+            continue
+
+        audio_filename = _audio_export_filename(segment)
+        audio_files.append((audio_path, audio_filename))
+
+        duration_seconds = 0.0
+        with suppress(Exception):
+            duration_seconds = get_wav_duration(audio_path)
+        if duration_seconds <= 0:
+            duration_seconds = segment.duration_seconds or (1.0 / fps)
+
+        segment_frame_count = max(1, int(round(duration_seconds * fps)))
+        segment_start = current_frame
+        segment_end_exclusive = segment_start + segment_frame_count
+
+        latest_series, latest_frames = _latest_sequence_frames_for_segment(segment)
+        if len(latest_frames) > segment_frame_count:
+            latest_frames = latest_frames[:segment_frame_count]
+
+        image_entries: list[dict] = []
+        if latest_frames:
+            image_count = len(latest_frames)
+            for index, frame in enumerate(latest_frames):
+                image_start = segment_start + (index * segment_frame_count) // image_count
+                image_end_exclusive = (
+                    segment_start
+                    + ((index + 1) * segment_frame_count) // image_count
+                )
+                if index == image_count - 1:
+                    image_end_exclusive = segment_end_exclusive
+                if image_end_exclusive <= image_start:
+                    image_end_exclusive = min(segment_end_exclusive, image_start + 1)
+                if image_start >= segment_end_exclusive:
+                    break
+
+                image_filename = _image_export_filename(segment, frame, index + 1)
+                image_files.append((frame.output_image_path or "", image_filename))
+                image_entries.append(
+                    {
+                        "frame_id": str(frame.id),
+                        "step_order": frame.step_order,
+                        "step_key": frame.step_key,
+                        "filename": image_filename,
+                        "start_frame": image_start,
+                        "end_frame_exclusive": image_end_exclusive,
+                        "frame_count": image_end_exclusive - image_start,
+                    }
+                )
+
+        exported_segments.append(
+            {
+                "segment_id": segment.id,
+                "position": segment.position,
+                "text": segment.text,
+                "audio": {
+                    "filename": audio_filename,
+                    "duration_seconds": round(duration_seconds, 6),
+                    "start_frame": segment_start,
+                    "end_frame_exclusive": segment_end_exclusive,
+                    "frame_count": segment_frame_count,
+                },
+                "latest_image_series_id": (
+                    str(latest_series.id) if latest_series else None
+                ),
+                "images": image_entries,
+            }
+        )
+        current_frame = segment_end_exclusive
+
+    payload = {
+        "project_id": str(project.id),
+        "project_name": project.name,
+        "fps": fps,
+        "audio_channel": 3,
+        "image_channel": 4,
+        "audio_volume": 1.9,
+        "timeline": {
+            "start_frame": 1,
+            "end_frame_exclusive": current_frame,
+        },
+        "segments": exported_segments,
+    }
+    return _TimelineExportArtifacts(
+        payload=payload,
+        audio_files=audio_files,
+        image_files=image_files,
+    )
+
+
 @router.get("/api/projects/{project_id}/export")
 async def api_export(
     project_id: uuid.UUID,
@@ -2210,29 +2382,11 @@ async def api_export(
     db: Session = Depends(get_db),
 ):
     project = _get_narration_project_or_404(project_id, db)
-    segments = _list_segments(project_id, db)
-
-    done_segments = [
-        segment
-        for segment in segments
-        if segment.status == "done"
-        and segment.audio_path
-        and os.path.exists(segment.audio_path)
-    ]
-    if not done_segments:
+    artifacts = _build_timeline_export_artifacts(project=project, db=db, fps=24)
+    if not artifacts.audio_files:
         raise HTTPException(400, "No audio segments to export")
 
-    paths = [
-        (
-            segment.studio_voice_audio_path
-            if (
-                segment.studio_voice_audio_path
-                and os.path.exists(segment.studio_voice_audio_path)
-            )
-            else segment.audio_path
-        )
-        for segment in done_segments
-    ]
+    paths = [path for path, _filename in artifacts.audio_files]
     combined = concatenate_segments(
         paths,
         gap_ms=gap_ms,
@@ -2258,34 +2412,15 @@ async def api_export_zip(
     db: Session = Depends(get_db),
 ):
     project = _get_narration_project_or_404(project_id, db)
-    segments = _list_segments(project_id, db)
-
-    done_segments = [
-        segment
-        for segment in segments
-        if segment.status == "done"
-        and segment.audio_path
-        and os.path.exists(segment.audio_path)
-    ]
-    if not done_segments:
+    artifacts = _build_timeline_export_artifacts(project=project, db=db, fps=24)
+    if not artifacts.audio_files:
         raise HTTPException(400, "No audio segments to export")
 
-    # Create zip file in memory
     zip_buffer = io.BytesIO()
     with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
-        for segment in done_segments:
-            audio_path = (
-                segment.studio_voice_audio_path
-                if (
-                    segment.studio_voice_audio_path
-                    and os.path.exists(segment.studio_voice_audio_path)
-                )
-                else segment.audio_path
-            )
-            if audio_path and os.path.exists(audio_path):
-                # Use position-based filename (1-indexed, zero-padded)
-                filename = f"{segment.position:03d}_{_safe_slug(segment.text[:30] or f'segment_{segment.position}')}.wav"
-                zip_file.write(audio_path, filename)
+        for source_path, filename_in_zip in artifacts.audio_files:
+            if source_path and os.path.exists(source_path):
+                zip_file.write(source_path, filename_in_zip)
 
     zip_buffer.seek(0)
     slug = _safe_slug(project.name.replace(" ", "_").lower())
@@ -2296,6 +2431,44 @@ async def api_export_zip(
         media_type="application/zip",
         headers={"Content-Disposition": f"attachment; filename={filename}"},
     )
+
+
+@router.get("/api/projects/{project_id}/export-images-zip")
+async def api_export_images_zip(
+    project_id: uuid.UUID,
+    db: Session = Depends(get_db),
+):
+    project = _get_narration_project_or_404(project_id, db)
+    artifacts = _build_timeline_export_artifacts(project=project, db=db, fps=24)
+
+    zip_buffer = io.BytesIO()
+    with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
+        for source_path, filename_in_zip in artifacts.image_files:
+            if source_path and os.path.exists(source_path):
+                zip_file.write(source_path, filename_in_zip)
+
+    zip_buffer.seek(0)
+    slug = _safe_slug(project.name.replace(" ", "_").lower())
+    filename = f"narration_{slug}_images.zip"
+
+    return StreamingResponse(
+        zip_buffer,
+        media_type="application/zip",
+        headers={"Content-Disposition": f"attachment; filename={filename}"},
+    )
+
+
+@router.get("/api/projects/{project_id}/export-timeline-metadata")
+async def api_export_timeline_metadata(
+    project_id: uuid.UUID,
+    fps: int = Query(24, ge=1, le=120),
+    db: Session = Depends(get_db),
+):
+    project = _get_narration_project_or_404(project_id, db)
+    artifacts = _build_timeline_export_artifacts(project=project, db=db, fps=fps)
+    if not artifacts.audio_files:
+        raise HTTPException(400, "No audio segments to export")
+    return artifacts.payload
 
 
 # --- Variants ---

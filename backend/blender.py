@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Blender audio segment importer for narration projects.
+Blender narration timeline importer for narration projects.
 
 This script:
-1. Downloads the audio segments zip file from the backend API
-2. Extracts the zip into a persistent narration directory next to the .blend file
-3. Appends each audio file (in order) to the Blender video editor timeline
+1. Downloads narration audio zip, image zip, and timeline metadata from the backend API
+2. Stores each import batch in timestamped subfolders next to the .blend file
+3. Appends narration audio strips and image strips to fixed channels in VSE
 
 Usage:
     blender --background --python blender.py
@@ -16,8 +16,9 @@ Environment variables:
     OUTPUT_BLEND: Path to save the .blend file (default: ./narration_project.blend)
 """
 
+import json
 import os
-import shutil
+import time
 import urllib.request
 import zipfile
 from pathlib import Path
@@ -30,6 +31,9 @@ BACKEND_URL = os.environ.get("BACKEND_URL", "http://localhost:8000")
 PROJECT_NAME = os.environ.get("PROJECT_NAME", "something")
 OUTPUT_BLEND_ENV = os.environ.get("OUTPUT_BLEND")
 OUTPUT_BLEND = OUTPUT_BLEND_ENV or "./narration_project.blend"
+AUDIO_CHANNEL = 3
+IMAGE_CHANNEL = 4
+AUDIO_GAIN = 1.9
 
 # Hardcoded project ID for "something" project
 # Update this if the project ID changes
@@ -50,14 +54,25 @@ def get_narration_dir(output_blend_path: Path) -> Path:
     return output_blend_path.parent / "narration"
 
 
-def prepare_narration_dir(narration_dir: Path) -> None:
-    """Ensure narration directory exists and is empty before extraction."""
+def get_image_dir(output_blend_path: Path) -> Path:
+    """Return the image directory adjacent to the blend file."""
+    return output_blend_path.parent / "image"
+
+
+def get_meta_dir(output_blend_path: Path) -> Path:
+    """Return the metadata directory adjacent to the blend file."""
+    return output_blend_path.parent / "meta"
+
+
+def get_batch_dirs(output_blend_path: Path, epoch_token: str) -> tuple[Path, Path, Path]:
+    """Return timestamped batch directories for narration/image/meta assets."""
+    narration_dir = get_narration_dir(output_blend_path) / epoch_token
+    image_dir = get_image_dir(output_blend_path) / epoch_token
+    meta_dir = get_meta_dir(output_blend_path) / epoch_token
     narration_dir.mkdir(parents=True, exist_ok=True)
-    for child in narration_dir.iterdir():
-        if child.is_dir():
-            shutil.rmtree(child)
-        else:
-            child.unlink()
+    image_dir.mkdir(parents=True, exist_ok=True)
+    meta_dir.mkdir(parents=True, exist_ok=True)
+    return narration_dir, image_dir, meta_dir
 
 
 def get_project_id_by_name(project_name: str) -> str | None:
@@ -81,38 +96,46 @@ def get_project_id_by_name(project_name: str) -> str | None:
     return None
 
 
-def download_zip(project_id: str, output_path: Path) -> Path:
-    """Download the audio segments zip file from the API."""
-    api_url = f"{BACKEND_URL}/api/projects/{project_id}/export-zip"
-    print(f"Downloading audio segments from: {api_url}")
+def download_file(api_url: str, output_path: Path) -> Path:
+    """Download a file from the API."""
+    print(f"Downloading from: {api_url}")
 
     try:
         urllib.request.urlretrieve(api_url, output_path)
-        print(f"Downloaded zip to: {output_path}")
+        print(f"Downloaded to: {output_path}")
         return output_path
     except Exception as e:
-        print(f"Error downloading zip: {e}")
+        print(f"Error downloading file: {e}")
+        raise
+
+
+def download_json(api_url: str, output_path: Path) -> dict:
+    """Download JSON from API and persist it to disk."""
+    print(f"Downloading metadata from: {api_url}")
+    try:
+        with urllib.request.urlopen(api_url) as response:
+            payload = json.loads(response.read().decode())
+        output_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        print(f"Saved metadata to: {output_path}")
+        return payload
+    except Exception as e:
+        print(f"Error downloading metadata: {e}")
         raise
 
 
 def extract_zip(zip_path: Path, extract_dir: Path) -> list[Path]:
-    """Extract the zip file and return sorted list of audio files."""
-    print(f"Extracting zip to: {extract_dir}")
+    """Extract a zip file and return extracted files."""
+    print(f"Extracting {zip_path.name} to: {extract_dir}")
 
     with zipfile.ZipFile(zip_path, "r") as zf:
         zf.extractall(extract_dir)
 
-    # Get all WAV files and sort by filename (which includes position prefix)
-    audio_files = sorted(
-        (path for path in extract_dir.rglob("*.wav") if path.is_file()),
+    extracted_files = sorted(
+        (path for path in extract_dir.rglob("*") if path.is_file()),
         key=lambda path: path.name,
     )
-    print(f"Found {len(audio_files)} audio segments")
-
-    for i, audio_file in enumerate(audio_files, 1):
-        print(f"  {i}. {audio_file.name}")
-
-    return audio_files
+    print(f"Found {len(extracted_files)} extracted files")
+    return extracted_files
 
 
 def get_strip_collection(seq_editor):
@@ -134,65 +157,103 @@ def setup_video_editing_scene():
     if not seq_editor:
         seq_editor = scene.sequence_editor_create()
 
-    strips = get_strip_collection(seq_editor)
-
-    # Clear only strips on channels 2+ so channel 1 content is preserved.
-    for strip in list(strips):
-        if strip.channel >= 2:
-            strips.remove(strip)
-
     return seq_editor
 
 
-def add_audio_to_timeline(audio_files: list[Path], start_channel: int = 1) -> int:
-    """
-    Add audio files sequentially to the video editor timeline.
-
-    Args:
-        audio_files: Sorted list of audio file paths
-        start_channel: Starting channel for audio strips
-
-    Returns:
-        The end frame of the last audio strip
-    """
-    scene = bpy.context.scene
-    seq_editor = scene.sequence_editor
-
-    if not seq_editor:
-        seq_editor = scene.sequence_editor_create()
-
+def ensure_channels_clear(seq_editor, channels: set[int]) -> None:
+    """Exit early if target channels are not empty."""
     strips = get_strip_collection(seq_editor)
+    occupied = [strip for strip in strips if strip.channel in channels]
+    if not occupied:
+        return
 
-    current_frame = 1
-    audio_strips = []
-
-    for i, audio_path in enumerate(audio_files):
-        print(f"Adding audio strip {i + 1}/{len(audio_files)}: {audio_path.name}")
-
-        # Add sound strip
-        strip = strips.new_sound(
-            name=f"Segment_{i + 1:03d}",
-            filepath=str(audio_path),
-            channel=start_channel,
-            frame_start=current_frame,
-        )
-
-        # Trim to actual audio length
-        strip.frame_final_end = current_frame + int(
-            strip.frame_final_duration * scene.render.fps / 24
-        )
-
-        audio_strips.append(strip)
-
-        # Next strip starts where this one ends
-        current_frame = int(strip.frame_final_end)
-
+    print("Target channels are not clear. Aborting import to avoid deleting existing data.")
+    for strip in occupied:
         print(
-            f"  Duration: {strip.frame_final_duration} frames "
-            f"(~{strip.frame_final_duration / scene.render.fps:.2f}s)"
+            f"  Channel {strip.channel}: {strip.name} "
+            f"(frames {strip.frame_start}-{strip.frame_final_end})"
         )
+    raise RuntimeError("Target channels are occupied")
 
-    return current_frame - 1
+
+def add_audio_from_metadata(metadata: dict, narration_dir: Path) -> int:
+    """Add audio strips to the timeline using metadata frame windows."""
+    scene = bpy.context.scene
+    seq_editor = scene.sequence_editor or scene.sequence_editor_create()
+    strips = get_strip_collection(seq_editor)
+    last_end_exclusive = 1
+
+    for segment in metadata.get("segments", []):
+        audio_meta = segment.get("audio", {})
+        filename = audio_meta.get("filename")
+        if not filename:
+            continue
+        audio_path = narration_dir / filename
+        if not audio_path.exists():
+            raise FileNotFoundError(f"Audio file not found: {audio_path}")
+
+        frame_start = int(audio_meta.get("start_frame", 1))
+        frame_end_exclusive = int(audio_meta.get("end_frame_exclusive", frame_start + 1))
+        if frame_end_exclusive <= frame_start:
+            raise ValueError(
+                f"Invalid audio frame range for segment {segment.get('segment_id')}: "
+                f"{frame_start}..{frame_end_exclusive}"
+            )
+
+        segment_label = int(segment.get("position", 0))
+        print(
+            f"Adding audio segment {segment_label:03d}: "
+            f"{audio_path.name} [{frame_start}, {frame_end_exclusive})"
+        )
+        strip = strips.new_sound(
+            name=f"Narration_{segment_label:03d}",
+            filepath=str(audio_path),
+            channel=AUDIO_CHANNEL,
+            frame_start=frame_start,
+        )
+        strip.frame_final_end = frame_end_exclusive
+        strip.volume = AUDIO_GAIN
+        last_end_exclusive = max(last_end_exclusive, frame_end_exclusive)
+    return last_end_exclusive
+
+
+def add_images_from_metadata(metadata: dict, image_dir: Path) -> int:
+    """Add image strips to timeline using metadata frame windows."""
+    scene = bpy.context.scene
+    seq_editor = scene.sequence_editor or scene.sequence_editor_create()
+    strips = get_strip_collection(seq_editor)
+    last_end_exclusive = 1
+
+    for segment in metadata.get("segments", []):
+        for image in segment.get("images", []):
+            filename = image.get("filename")
+            if not filename:
+                continue
+            image_path = image_dir / filename
+            if not image_path.exists():
+                raise FileNotFoundError(f"Image file not found: {image_path}")
+
+            frame_start = int(image.get("start_frame", 1))
+            frame_end_exclusive = int(image.get("end_frame_exclusive", frame_start + 1))
+            if frame_end_exclusive <= frame_start:
+                raise ValueError(
+                    f"Invalid image frame range for file {filename}: "
+                    f"{frame_start}..{frame_end_exclusive}"
+                )
+
+            print(
+                f"Adding image strip: {image_path.name} "
+                f"[{frame_start}, {frame_end_exclusive})"
+            )
+            strip = strips.new_image(
+                name=f"Image_{segment.get('position', 0):03d}_{image.get('step_order', 0):03d}",
+                filepath=str(image_path),
+                channel=IMAGE_CHANNEL,
+                frame_start=frame_start,
+            )
+            strip.frame_final_end = frame_end_exclusive
+            last_end_exclusive = max(last_end_exclusive, frame_end_exclusive)
+    return last_end_exclusive
 
 
 def main():
@@ -201,7 +262,7 @@ def main():
     print("Blender Narration Audio Importer")
     print("=" * 60)
 
-    # Set render FPS for consistent timing
+    # Set render FPS for consistent timing and metadata math.
     bpy.context.scene.render.fps = 24
     bpy.context.scene.render.fps_base = 1.0
 
@@ -218,43 +279,70 @@ def main():
     print(f"Project ID: {project_id}")
 
     output_blend_path = resolve_output_blend_path()
-    narration_dir = get_narration_dir(output_blend_path)
-    print(f"Using narration directory: {narration_dir}")
+    epoch_token = str(int(time.time()))
+    narration_dir, image_dir, meta_dir = get_batch_dirs(output_blend_path, epoch_token)
+    print(f"Using asset batch: {epoch_token}")
+    print(f"  Narration dir: {narration_dir}")
+    print(f"  Image dir: {image_dir}")
+    print(f"  Meta dir: {meta_dir}")
 
-    # Start from a clean narration directory so stale files do not break references.
-    prepare_narration_dir(narration_dir)
+    fps = bpy.context.scene.render.fps
+    metadata_url = f"{BACKEND_URL}/api/projects/{project_id}/export-timeline-metadata?fps={fps}"
+    audio_zip_url = f"{BACKEND_URL}/api/projects/{project_id}/export-zip"
+    image_zip_url = f"{BACKEND_URL}/api/projects/{project_id}/export-images-zip"
 
-    zip_path = narration_dir / "audio_segments.zip"
+    metadata_path = meta_dir / "timeline_metadata.json"
+    audio_zip_path = narration_dir / "audio_segments.zip"
+    image_zip_path = image_dir / "image_segments.zip"
 
-    # Download and extract into persistent narration folder.
-    download_zip(project_id, zip_path)
+    metadata = download_json(metadata_url, metadata_path)
+    download_file(audio_zip_url, audio_zip_path)
+    download_file(image_zip_url, image_zip_path)
+
     try:
-        audio_files = extract_zip(zip_path, narration_dir)
+        extract_zip(audio_zip_path, narration_dir)
+        extract_zip(image_zip_path, image_dir)
     finally:
-        # Cleanup downloaded zip after extraction (or failure).
-        if zip_path.exists():
-            zip_path.unlink()
-            print(f"Removed zip file: {zip_path}")
+        if audio_zip_path.exists():
+            audio_zip_path.unlink()
+            print(f"Removed zip file: {audio_zip_path}")
+        if image_zip_path.exists():
+            image_zip_path.unlink()
+            print(f"Removed zip file: {image_zip_path}")
 
-    if not audio_files:
-        print("No audio files found in zip")
+    if not metadata.get("segments"):
+        print("No segment metadata returned")
         bpy.ops.wm.quit_blender()
         return
 
-    # Setup video editing scene
-    setup_video_editing_scene()
+    seq_editor = setup_video_editing_scene()
+    try:
+        ensure_channels_clear(seq_editor, channels={AUDIO_CHANNEL, IMAGE_CHANNEL})
+    except RuntimeError as exc:
+        print(str(exc))
+        bpy.ops.wm.quit_blender()
+        return
 
-    # Add audio strips to timeline (starting at channel 2)
-    end_frame = add_audio_to_timeline(audio_files, start_channel=2)
+    audio_end_exclusive = add_audio_from_metadata(metadata, narration_dir)
+    image_end_exclusive = add_images_from_metadata(metadata, image_dir)
+    timeline_end_exclusive = int(
+        metadata.get("timeline", {}).get(
+            "end_frame_exclusive",
+            max(audio_end_exclusive, image_end_exclusive),
+        )
+    )
+    max_end_exclusive = max(audio_end_exclusive, image_end_exclusive, timeline_end_exclusive)
 
-    # Set timeline range
     bpy.context.scene.frame_start = 1
-    bpy.context.scene.frame_end = end_frame
+    bpy.context.scene.frame_end = max(1, max_end_exclusive - 1)
     bpy.context.scene.frame_current = 1
 
-    print(f"Timeline set to frames 1-{end_frame}")
+    print(f"Timeline set to frames 1-{bpy.context.scene.frame_end}")
+    print(
+        f"Placed strips on channels: audio={AUDIO_CHANNEL} (volume={AUDIO_GAIN}), "
+        f"images={IMAGE_CHANNEL}"
+    )
 
-    # Save the blend file
     bpy.ops.wm.save_as_mainfile(filepath=str(output_blend_path))
     print(f"Saved Blender project to: {output_blend_path}")
 
@@ -262,7 +350,6 @@ def main():
     print("Import complete!")
     print("=" * 60)
 
-    # Don't quit when running interactively
     if not bpy.app.background:
         print("Switch to Video Editing workspace to view the timeline")
 
