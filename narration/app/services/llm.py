@@ -17,8 +17,8 @@ import httpx
 
 logger = logging.getLogger(__name__)
 
-OPENAI_BASE_URL = os.environ.get("OPENAI_BASE_URL", "http://192.168.6.19:8002/v1")
-OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16")
+OPENAI_BASE_URL = os.environ.get("OPENAI_BASE_URL", "http://192.168.5.173:1234/v1")
+OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "qwen3.5-27b")
 OPENAI_API_KEY = (
     os.environ.get("OPENAI_API_KEY")
     or os.environ.get("GROQ_API_KEY")

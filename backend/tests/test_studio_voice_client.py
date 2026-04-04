@@ -3,8 +3,8 @@ from app.clients.studio_voice.client import StudioVoiceClient
 
 def test_grpc_targets_prefers_explicit_target():
     client = StudioVoiceClient(
-        url="http://192.168.5.173:8000",
-        health_url="http://192.168.5.173:8000/v1/health/ready",
+        url="http://192.168.6.3:8000",
+        health_url="http://192.168.6.3:8000/v1/health/ready",
         grpc_target="192.168.5.173:9001",
     )
 
@@ -17,8 +17,8 @@ def test_grpc_targets_prefers_explicit_target():
 
 def test_grpc_targets_default_to_8001_for_http_api_url():
     client = StudioVoiceClient(
-        url="http://192.168.5.173:8000",
-        health_url="http://192.168.5.173:8000/v1/health/ready",
+        url="http://192.168.6.3:8000",
+        health_url="http://192.168.6.3:8000/v1/health/ready",
         grpc_target=None,
     )
 
