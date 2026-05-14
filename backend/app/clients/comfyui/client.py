@@ -6,6 +6,7 @@ import json
 import logging
 import random
 from pathlib import Path
+from typing import Any
 
 import httpx
 
@@ -30,13 +31,19 @@ class ComfyUIClient:
 
     def __init__(
         self,
+        config: dict[str, Any] | None = None,
         url: str | None = None,
         poll_interval: float = 5.0,
         timeout: float = 600.0,
     ):
-        self.url = url or settings.comfyui_url
-        self.poll_interval = poll_interval
-        self.timeout = timeout
+        if config is not None:
+            self.url = config.get("url", settings.comfyui_url)
+            self.poll_interval = config.get("poll_interval", poll_interval)
+            self.timeout = config.get("timeout", timeout)
+        else:
+            self.url = url or settings.comfyui_url
+            self.poll_interval = poll_interval
+            self.timeout = timeout
 
     async def upload_file(self, file_bytes: bytes, filename: str) -> str:
         """Upload a file (image or video) to ComfyUI's input directory.

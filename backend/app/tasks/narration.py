@@ -20,6 +20,7 @@ from app.models.narration import (
     NarrationVariant,
     NarrationVoiceSample,
 )
+from app.services.client_factory import build_studio_voice_client
 from app.services.narration.dia import generate as dia_generate
 from app.services.narration.dia import get_wav_duration
 from app.services.narration.events import (
@@ -312,12 +313,14 @@ def _run_single_attempt(
     db.commit()
     db.refresh(variant)
 
-    if settings.studio_voice_auto_clean and variant.audio_path:
+    sv_client = build_studio_voice_client(db)
+    if sv_client.auto_clean and variant.audio_path:
         studio_voice_result = asyncio.run(
             enhance_audio_file(
                 variant.audio_path,
                 output_audio_path=studio_voice_output_path(variant.audio_path),
                 check_health=True,
+                client=sv_client,
             )
         )
         variant.studio_voice_status = studio_voice_result.status
@@ -663,8 +666,9 @@ def clean_project_studio_voice_task(
             "error": "Invalid project id",
         }
 
+    sv_client = build_studio_voice_client(db)
     try:
-        if not asyncio.run(is_studio_voice_ready()):
+        if not asyncio.run(is_studio_voice_ready(client=sv_client)):
             logger.warning(
                 "Studio Voice clean-all skipped for project %s: service unavailable",
                 project_id,
@@ -708,6 +712,7 @@ def clean_project_studio_voice_task(
                                 variant.audio_path
                             ),
                             check_health=False,
+                            client=sv_client,
                         )
                     )
                     _apply_studio_voice_result_to_variant(
@@ -758,6 +763,7 @@ def clean_project_studio_voice_task(
                     segment.audio_path,
                     output_audio_path=studio_voice_output_path(segment.audio_path),
                     check_health=False,
+                    client=sv_client,
                 )
             )
             _apply_studio_voice_result_to_segment(

@@ -1,5 +1,5 @@
-import wave
 import io
+import wave
 import zipfile
 from types import SimpleNamespace
 

@@ -4,6 +4,7 @@ import base64
 import logging
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import httpx
 
@@ -33,13 +34,19 @@ class QwenVLClient:
 
     def __init__(
         self,
+        config: dict[str, Any] | None = None,
         url: str | None = None,
         model: str = "Qwen/Qwen3-VL-4B-Instruct",
         timeout: float = 120.0,
     ):
-        self.url = (url or settings.qwen_vl_url).rstrip("/")
-        self.model = model
-        self.timeout = timeout
+        if config is not None:
+            self.url = (config.get("url") or settings.qwen_vl_url).rstrip("/")
+            self.model = config.get("model", model)
+            self.timeout = config.get("timeout", timeout)
+        else:
+            self.url = (url or settings.qwen_vl_url).rstrip("/")
+            self.model = model
+            self.timeout = timeout
 
     async def _request_completion(self, payload: dict) -> VideoAnalysis:
         endpoint = f"{self.url}/v1/chat/completions"

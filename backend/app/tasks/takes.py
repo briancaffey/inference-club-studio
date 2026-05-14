@@ -4,10 +4,10 @@ import logging
 import subprocess
 
 from app.celery_app import celery
-from app.clients.comfyui.client import ComfyUIClient
 from app.config import settings
 from app.database import SessionLocal
 from app.models.take import Take, TakeStatus
+from app.services.client_factory import build_comfyui_client
 from app.utils.media import ensure_media_dir
 
 logger = logging.getLogger(__name__)
@@ -57,7 +57,7 @@ def generate_video_take(self, take_id: str):
             settings.media_dir, project_id, "takes", take_id, "canny"
         )
 
-        client = ComfyUIClient()
+        client = build_comfyui_client(db)
 
         # Step 1: Upload assets to ComfyUI
         take.status = TakeStatus.UPLOADING_ASSETS.value

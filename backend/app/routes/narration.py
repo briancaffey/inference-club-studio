@@ -46,6 +46,7 @@ from app.models.narration_image import (
     NarrationImageSeries,
 )
 from app.models.project import Project, ProjectType
+from app.services.client_factory import build_studio_voice_client
 from app.services.narration.audio import (
     concatenate_segments,
     export_audio,
@@ -1917,11 +1918,13 @@ async def api_trim_segment(
             exc,
         )
 
-    if settings.studio_voice_auto_clean and os.path.exists(audio_path):
+    sv_client = build_studio_voice_client(db)
+    if sv_client.auto_clean and os.path.exists(audio_path):
         studio_voice_result = await enhance_audio_file(
             audio_path,
             output_audio_path=studio_voice_output_path(audio_path),
             check_health=True,
+            client=sv_client,
         )
 
         segment.studio_voice_audio_path = studio_voice_result.output_path
@@ -2236,10 +2239,7 @@ def _image_export_filename(
 ) -> str:
     suffix = Path(frame.output_image_path or "").suffix.lower() or ".png"
     frame_token = _safe_slug(frame.step_key or str(frame.id))
-    return (
-        f"{segment.position:03d}/"
-        f"{index:03d}_{frame_token}{suffix}"
-    )
+    return f"{segment.position:03d}/" f"{index:03d}_{frame_token}{suffix}"
 
 
 def _latest_sequence_frames_for_segment(
@@ -2306,10 +2306,11 @@ def _build_timeline_export_artifacts(
         if latest_frames:
             image_count = len(latest_frames)
             for index, frame in enumerate(latest_frames):
-                image_start = segment_start + (index * segment_frame_count) // image_count
+                image_start = (
+                    segment_start + (index * segment_frame_count) // image_count
+                )
                 image_end_exclusive = (
-                    segment_start
-                    + ((index + 1) * segment_frame_count) // image_count
+                    segment_start + ((index + 1) * segment_frame_count) // image_count
                 )
                 if index == image_count - 1:
                     image_end_exclusive = segment_end_exclusive

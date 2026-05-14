@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from typing import Any
 from urllib.parse import urlparse
 
 import httpx
@@ -26,21 +27,37 @@ class StudioVoiceClient:
 
     def __init__(
         self,
+        config: dict[str, Any] | None = None,
         url: str | None = None,
         health_url: str | None = None,
         grpc_target: str | None = None,
         model_type: str | None = None,
         timeout: float = 120.0,
     ):
-        self.url = (url or settings.studio_voice_url).rstrip("/")
-        self.health_url = (health_url or settings.studio_voice_health_url).rstrip("/")
-        configured_target = (
-            grpc_target
-            if grpc_target is not None
-            else settings.studio_voice_grpc_target
+        cfg = config or {}
+
+        resolved_url = cfg.get("url") if "url" in cfg else url
+        self.url = (resolved_url or settings.studio_voice_url).rstrip("/")
+
+        resolved_health = cfg.get("health_url") if "health_url" in cfg else health_url
+        self.health_url = (resolved_health or settings.studio_voice_health_url).rstrip(
+            "/"
         )
-        self.grpc_target = (configured_target or "").strip()
-        self.model_type = model_type or settings.studio_voice_model_type
+
+        resolved_grpc = cfg.get("grpc_target") if "grpc_target" in cfg else grpc_target
+        if resolved_grpc is None:
+            resolved_grpc = settings.studio_voice_grpc_target
+        self.grpc_target = (resolved_grpc or "").strip()
+
+        resolved_model = cfg.get("model_type") if "model_type" in cfg else model_type
+        self.model_type = resolved_model or settings.studio_voice_model_type
+
+        self.input_sample_rate = int(
+            cfg.get("input_sample_rate", settings.studio_voice_input_sample_rate)
+        )
+        self.auto_clean = bool(cfg.get("auto_clean", settings.studio_voice_auto_clean))
+        self.enhance_path = cfg.get("enhance_path", settings.studio_voice_enhance_path)
+
         self.timeout = timeout
 
     async def check_health(self) -> bool:

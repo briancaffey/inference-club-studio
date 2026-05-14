@@ -4,12 +4,17 @@ from functools import partial
 from typing import Awaitable, Callable
 
 import httpx
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
+from sqlalchemy.orm import Session
 
-from app.clients.comfyui.client import ComfyUIClient
-from app.clients.invokeai.client import InvokeAIClient
-from app.clients.qwen_vl.client import QwenVLClient
-from app.config import settings
+from app.database import get_db
+from app.services.client_factory import (
+    build_comfyui_client,
+    build_invokeai_client,
+    build_qwen_vl_client,
+    build_studio_voice_client,
+)
+from app.services.config_manager import ConfigManager
 
 router = APIRouter(tags=["health"])
 
@@ -61,69 +66,86 @@ def health_check():
 
 
 @router.get("/services/health")
-async def services_health_check():
+async def services_health_check(db: Session = Depends(get_db)):
+    manager = ConfigManager(db)
+
+    llm_cfg = manager.get_config("llm")
+    dia_cfg = manager.get_config("dia")
+    magpie_cfg = manager.get_config("magpie")
+    stt_cfg = manager.get_config("stt")
+
+    invokeai_client = build_invokeai_client(db)
+    comfyui_client = build_comfyui_client(db)
+    qwen_vl_client = build_qwen_vl_client(db)
+    studio_voice_client = build_studio_voice_client(db)
+
+    llm_base_url = llm_cfg.get("base_url", "")
+    dia_url = dia_cfg.get("url", "")
+    magpie_url = magpie_cfg.get("url", "")
+    stt_url = stt_cfg.get("url", "")
+
     services: list[tuple[str, str, str, ServiceCheck]] = [
         (
             "llm",
             "LLM (OpenAI API)",
-            settings.openai_base_url,
+            llm_base_url,
             partial(
                 _check_http_reachable,
-                settings.openai_base_url,
+                llm_base_url,
                 ("/models", "/chat/completions", "/"),
             ),
         ),
         (
             "invokeai",
             "InvokeAI",
-            settings.invokeai_url,
-            partial(_check_client_health, InvokeAIClient().check_health),
+            invokeai_client.url,
+            partial(_check_client_health, invokeai_client.check_health),
         ),
         (
             "comfyui",
             "ComfyUI",
-            settings.comfyui_url,
-            partial(_check_client_health, ComfyUIClient().check_health),
+            comfyui_client.url,
+            partial(_check_client_health, comfyui_client.check_health),
         ),
         (
             "qwen_vl",
             "Qwen VL",
-            settings.qwen_vl_url,
-            partial(_check_client_health, QwenVLClient().check_health),
+            qwen_vl_client.url,
+            partial(_check_client_health, qwen_vl_client.check_health),
         ),
         (
             "dia",
             "Dia TTS",
-            settings.dia_url,
-            partial(_check_http_reachable, settings.dia_url, ("/gradio_api/info", "/")),
+            dia_url,
+            partial(_check_http_reachable, dia_url, ("/gradio_api/info", "/")),
         ),
         (
             "magpie",
             "Magpie TTS",
-            settings.magpie_url,
+            magpie_url,
             partial(
                 _check_http_reachable,
-                settings.magpie_url,
+                magpie_url,
                 ("/v1/audio/list_voices", "/"),
             ),
         ),
         (
             "stt",
             "Speech-to-Text",
-            settings.stt_url,
+            stt_url,
             partial(
                 _check_http_reachable,
-                settings.stt_url,
+                stt_url,
                 ("/health", "/transcribe", "/"),
             ),
         ),
         (
             "studio_voice",
             "NVIDIA Studio Voice",
-            settings.studio_voice_url,
+            studio_voice_client.url,
             partial(
                 _check_http_reachable,
-                settings.studio_voice_health_url,
+                studio_voice_client.health_url,
                 ("",),
             ),
         ),

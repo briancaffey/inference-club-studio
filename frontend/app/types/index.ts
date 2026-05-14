@@ -327,3 +327,52 @@ export interface NarrationImageSeries {
 export interface NarrationImagePromptSuggestionResponse {
   suggestions: string[]
 }
+
+// Service Config Types
+export type ServiceConfigKey =
+  | 'invokeai'
+  | 'comfyui'
+  | 'studio_voice'
+  | 'llm'
+  | 'dia'
+  | 'magpie'
+  | 'stt'
+  | 'qwen_vl'
+
+export interface ServiceConfigField {
+  type: 'string' | 'number' | 'boolean'
+  required: boolean
+  default?: unknown
+  description?: string
+}
+
+export interface ServiceConfigSchema {
+  [key: string]: ServiceConfigField
+}
+
+export interface ServiceConfigResponse {
+  service_key: string
+  config: Record<string, unknown>
+  source: 'database' | 'environment'
+}
+
+export interface AllConfigsResponse {
+  [key: string]: {
+    config: Record<string, unknown>
+    schema_fields: string[]
+  }
+}
+
+export interface ConfigAuditEntry {
+  id: number
+  changed_fields: Record<string, unknown>
+  old_config: Record<string, unknown>
+  new_config: Record<string, unknown>
+  updated_by: string | null
+  created_at: string
+}
+
+export interface ConfigAuditResponse {
+  service_key: string
+  audits: ConfigAuditEntry[]
+}

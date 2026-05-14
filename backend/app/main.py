@@ -15,6 +15,7 @@ from app.routes import (
     narration,
     narration_images,
     projects,
+    service_configs,
     takes,
 )
 
@@ -62,3 +63,4 @@ app.include_router(generations.router, prefix="/api/v1")
 app.include_router(takes.router, prefix="/api/v1")
 app.include_router(narration.router)
 app.include_router(narration_images.router)
+app.include_router(service_configs.router)

@@ -3,10 +3,10 @@ import logging
 import subprocess
 
 from app.celery_app import celery
-from app.clients.invokeai.client import InvokeAIClient
 from app.config import settings
 from app.database import SessionLocal
 from app.models.generation import Generation, GenerationStatus
+from app.services.client_factory import build_invokeai_client
 from app.utils.media import ensure_media_dir
 
 logger = logging.getLogger(__name__)
@@ -75,7 +75,7 @@ def generate_style_transfer(self, generation_id: str):
         with open(reference_frame_path, "rb") as f:
             frame_bytes = f.read()
 
-        client = InvokeAIClient()
+        client = build_invokeai_client(db)
         image_name = asyncio.run(
             client.upload_image(frame_bytes, "reference_frame.png")
         )

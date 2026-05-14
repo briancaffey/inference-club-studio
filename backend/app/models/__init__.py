@@ -22,4 +22,8 @@ from app.models.narration_image import (  # noqa: F401
     NarrationImageSeriesStatus,
 )
 from app.models.project import Project, ProjectType  # noqa: F401
+from app.models.service_config import (  # noqa: F401
+    ServiceConfig,
+    ServiceConfigAudit,
+)
 from app.models.take import Take, TakeStatus  # noqa: F401

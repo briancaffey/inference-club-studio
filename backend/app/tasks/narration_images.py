@@ -4,7 +4,6 @@ import uuid
 from datetime import datetime, timezone
 
 from app.celery_app import celery
-from app.clients.invokeai.client import InvokeAIClient
 from app.config import settings
 from app.database import SessionLocal
 from app.models.narration_image import (
@@ -14,6 +13,7 @@ from app.models.narration_image import (
     NarrationImageSeries,
     NarrationImageSeriesStatus,
 )
+from app.services.client_factory import build_invokeai_client
 from app.utils.media import ensure_media_dir
 
 logger = logging.getLogger(__name__)
@@ -72,7 +72,7 @@ def _generate_frame_image(
     frame.error_message = None
     db.commit()
 
-    client = InvokeAIClient()
+    client = build_invokeai_client(db)
     if frame.mode == NarrationImageGenerationMode.TEXT_TO_IMAGE.value:
         result = asyncio.run(
             client.generate_text_to_image(

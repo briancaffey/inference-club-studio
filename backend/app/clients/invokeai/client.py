@@ -10,6 +10,7 @@ import logging
 import mimetypes
 import random
 from dataclasses import dataclass
+from typing import Any
 
 import httpx
 
@@ -330,17 +331,27 @@ class InvokeAIClient:
 
     def __init__(
         self,
+        config: dict[str, Any] | None = None,
         url: str | None = None,
         board_id: str | None = None,
         poll_interval: float = 2.0,
         timeout: float = 300.0,
         max_retries: int = 3,
     ):
-        self.url = url or settings.invokeai_url
-        self.board_id = board_id if board_id is not None else settings.invokeai_board_id
-        self.poll_interval = poll_interval
-        self.timeout = timeout
-        self.max_retries = max_retries
+        if config is not None:
+            self.url = config.get("url", settings.invokeai_url)
+            self.board_id = config.get("board_id", settings.invokeai_board_id)
+            self.poll_interval = config.get("poll_interval", poll_interval)
+            self.timeout = config.get("timeout", timeout)
+            self.max_retries = config.get("max_retries", max_retries)
+        else:
+            self.url = url or settings.invokeai_url
+            self.board_id = (
+                board_id if board_id is not None else settings.invokeai_board_id
+            )
+            self.poll_interval = poll_interval
+            self.timeout = timeout
+            self.max_retries = max_retries
 
     def _build_ref_img_batch(
         self,

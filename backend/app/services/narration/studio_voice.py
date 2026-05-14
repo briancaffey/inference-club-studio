@@ -12,7 +12,6 @@ from typing import Literal
 from pydub import AudioSegment
 
 from app.clients.studio_voice.client import StudioVoiceClient
-from app.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -42,9 +41,9 @@ def studio_voice_output_path(source_audio_path: str) -> str:
     return str(source.with_name(f"{source.stem}_studio_voice.wav"))
 
 
-def _prepare_wav_for_studio_voice(source_audio_path: str) -> str:
+def _prepare_wav_for_studio_voice(source_audio_path: str, sample_rate: int) -> str:
     segment = AudioSegment.from_file(source_audio_path)
-    segment = segment.set_frame_rate(settings.studio_voice_input_sample_rate)
+    segment = segment.set_frame_rate(sample_rate)
     segment = segment.set_channels(1)
     segment = segment.set_sample_width(2)
 
@@ -91,7 +90,9 @@ async def enhance_audio_file(
 
     temp_input_path: str | None = None
     try:
-        temp_input_path = _prepare_wav_for_studio_voice(str(source_path))
+        temp_input_path = _prepare_wav_for_studio_voice(
+            str(source_path), svc.input_sample_rate
+        )
         prepared_bytes = Path(temp_input_path).read_bytes()
 
         enhanced_bytes = await svc.enhance_audio(
