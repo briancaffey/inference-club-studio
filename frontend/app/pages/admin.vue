@@ -53,7 +53,9 @@ const serviceLabels: Record<string, string> = {
   dia: 'DIA TTS',
   magpie: 'Magpie TTS',
   stt: 'Speech-to-Text',
-  qwen_vl: 'Qwen-VL',
+  flux2_klein: 'Flux 2 Klein NIM',
+  openai_image: 'OpenAI Image API',
+  image_generation: 'Image Generation Provider',
 }
 
 async function loadConfigs() {

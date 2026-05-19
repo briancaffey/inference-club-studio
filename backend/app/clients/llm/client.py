@@ -1,4 +1,9 @@
-"""Client for Qwen3-VL vision-language model served via vLLM."""
+"""Generic OpenAI-compatible chat-completions client.
+
+Backed by the ``llm`` service config (base_url already includes ``/v1``,
+plus model + optional api_key). Supports text, image, and video content
+blocks via the chat-completions multimodal message format.
+"""
 
 import base64
 import logging
@@ -13,71 +18,85 @@ from app.config import settings
 logger = logging.getLogger(__name__)
 
 
-class QwenVLError(Exception):
-    """Exception raised when Qwen VL operations fail."""
-
-    pass
+class LLMError(Exception):
+    """Raised when an LLM API call fails."""
 
 
 @dataclass
-class VideoAnalysis:
-    """Result from a chat completion request."""
-
+class ChatCompletionResult:
     content: str
     model: str
     prompt_tokens: int
     completion_tokens: int
 
 
-class QwenVLClient:
-    """Client for Qwen3-VL vision-language model via vLLM OpenAI-compatible API."""
+class LLMClient:
+    """OpenAI-compatible chat completions client (text + multimodal)."""
 
     def __init__(
         self,
         config: dict[str, Any] | None = None,
-        url: str | None = None,
-        model: str = "Qwen/Qwen3-VL-4B-Instruct",
+        base_url: str | None = None,
+        model: str | None = None,
+        api_key: str | None = None,
         timeout: float = 120.0,
     ):
         if config is not None:
-            self.url = (config.get("url") or settings.qwen_vl_url).rstrip("/")
-            self.model = config.get("model", model)
-            self.timeout = config.get("timeout", timeout)
+            self.base_url = (
+                config.get("base_url") or settings.openai_base_url
+            ).rstrip("/")
+            self.model = config.get("model") or settings.openai_model
+            self.api_key = (
+                config.get("api_key") or settings.openai_api_key or None
+            )
+            self.timeout = float(config.get("timeout", timeout))
         else:
-            self.url = (url or settings.qwen_vl_url).rstrip("/")
-            self.model = model
+            self.base_url = (base_url or settings.openai_base_url).rstrip("/")
+            self.model = model or settings.openai_model
+            self.api_key = api_key or settings.openai_api_key or None
             self.timeout = timeout
 
-    async def _request_completion(self, payload: dict) -> VideoAnalysis:
-        endpoint = f"{self.url}/v1/chat/completions"
+    @property
+    def url(self) -> str:
+        """Base URL (used by health-check/registry display)."""
+        return self.base_url
 
+    def _headers(self) -> dict[str, str]:
+        headers = {"Content-Type": "application/json"}
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
+        return headers
+
+    async def _request_completion(self, payload: dict) -> ChatCompletionResult:
+        endpoint = f"{self.base_url}/chat/completions"
         try:
             async with httpx.AsyncClient(timeout=self.timeout) as client:
                 response = await client.post(
-                    endpoint,
-                    json=payload,
-                    headers={"Content-Type": "application/json"},
+                    endpoint, json=payload, headers=self._headers()
                 )
                 response.raise_for_status()
-
         except httpx.TimeoutException:
-            raise QwenVLError(f"Request timed out after {self.timeout}s.")
-        except httpx.HTTPStatusError as e:
-            body = e.response.text[:500] if e.response else "no body"
-            raise QwenVLError(f"vLLM returned HTTP {e.response.status_code}: {body}")
-        except httpx.RequestError as e:
-            raise QwenVLError(f"Failed to connect to vLLM at {self.url}: {e}")
+            raise LLMError(f"Request timed out after {self.timeout}s.")
+        except httpx.HTTPStatusError as exc:
+            body = exc.response.text[:500] if exc.response else "no body"
+            raise LLMError(
+                f"LLM returned HTTP {exc.response.status_code}: {body}"
+            )
+        except httpx.RequestError as exc:
+            raise LLMError(
+                f"Failed to connect to LLM at {self.base_url}: {exc}"
+            )
 
         data = response.json()
-        choice = data.get("choices", [{}])[0]
-        message = choice.get("message", {})
-        usage = data.get("usage", {})
+        choice = (data.get("choices") or [{}])[0]
+        message = choice.get("message", {}) or {}
+        usage = data.get("usage") or {}
 
-        content = message.get("content", "")
+        content = message.get("content") or ""
         if not content:
-            raise QwenVLError("Empty response from model")
+            raise LLMError("Empty response from model")
 
-        return VideoAnalysis(
+        return ChatCompletionResult(
             content=content,
             model=data.get("model", self.model),
             prompt_tokens=usage.get("prompt_tokens", 0),
@@ -91,14 +110,10 @@ class QwenVLClient:
         max_tokens: int = 1024,
         temperature: float = 0.7,
         top_p: float = 0.8,
-    ) -> VideoAnalysis:
-        """Analyze a video file using Qwen3-VL.
-
-        Sends the video as a base64 data URI to the vLLM OpenAI-compatible API.
-        """
+    ) -> ChatCompletionResult:
         video_path = Path(video_path)
         if not video_path.exists():
-            raise QwenVLError(f"Video file not found: {video_path}")
+            raise LLMError(f"Video file not found: {video_path}")
 
         logger.info("Reading video file: %s", video_path)
         video_bytes = video_path.read_bytes()
@@ -121,10 +136,7 @@ class QwenVLClient:
                                 "url": f"data:video/mp4;base64,{video_b64}",
                             },
                         },
-                        {
-                            "type": "text",
-                            "text": prompt,
-                        },
+                        {"type": "text", "text": prompt},
                     ],
                 }
             ],
@@ -146,11 +158,10 @@ class QwenVLClient:
         max_tokens: int = 512,
         temperature: float = 0.7,
         top_p: float = 0.8,
-    ) -> VideoAnalysis:
-        """Analyze an image file using Qwen3-VL."""
+    ) -> ChatCompletionResult:
         image_path = Path(image_path)
         if not image_path.exists():
-            raise QwenVLError(f"Image file not found: {image_path}")
+            raise LLMError(f"Image file not found: {image_path}")
 
         suffix = image_path.suffix.lower().lstrip(".")
         mime_map = {"jpg": "jpeg", "jpeg": "jpeg", "png": "png", "webp": "webp"}
@@ -171,10 +182,7 @@ class QwenVLClient:
                                 "url": f"data:image/{mime_subtype};base64,{image_b64}",
                             },
                         },
-                        {
-                            "type": "text",
-                            "text": prompt,
-                        },
+                        {"type": "text", "text": prompt},
                     ],
                 }
             ],
@@ -191,7 +199,7 @@ class QwenVLClient:
         max_tokens: int = 512,
         temperature: float = 0.4,
         top_p: float = 0.8,
-    ) -> VideoAnalysis:
+    ) -> ChatCompletionResult:
         payload = {
             "model": self.model,
             "messages": [{"role": "user", "content": prompt}],
@@ -199,15 +207,16 @@ class QwenVLClient:
             "temperature": temperature,
             "top_p": top_p,
         }
-        logger.info("Sending text generation request to %s", self.url)
+        logger.info("Sending text generation request to %s", self.base_url)
         return await self._request_completion(payload)
 
     async def check_health(self) -> bool:
-        """Check if the vLLM service is reachable."""
         try:
             async with httpx.AsyncClient(timeout=5.0) as client:
-                response = await client.get(f"{self.url}/v1/models")
+                response = await client.get(
+                    f"{self.base_url}/models", headers=self._headers()
+                )
                 return response.status_code == 200
-        except Exception as e:
-            logger.warning("Qwen VL health check failed: %s", e)
+        except Exception as exc:
+            logger.warning("LLM health check failed: %s", exc)
             return False

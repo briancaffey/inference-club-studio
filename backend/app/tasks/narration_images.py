@@ -2,6 +2,7 @@ import asyncio
 import logging
 import uuid
 from datetime import datetime, timezone
+from pathlib import Path
 
 from app.celery_app import celery
 from app.config import settings
@@ -13,7 +14,12 @@ from app.models.narration_image import (
     NarrationImageSeries,
     NarrationImageSeriesStatus,
 )
-from app.services.client_factory import build_invokeai_client
+from app.services.client_factory import (
+    build_flux2_klein_client,
+    build_invokeai_client,
+    build_openai_image_client,
+)
+from app.services.config_manager import ConfigManager
 from app.utils.media import ensure_media_dir
 
 logger = logging.getLogger(__name__)
@@ -63,15 +69,33 @@ def _resolve_reference_image_name(
     return parent.invokeai_generated_image_name
 
 
-def _generate_frame_image(
+def _resolve_reference_image_bytes(
     db,
-    series: NarrationImageSeries,
     frame: NarrationImageFrame,
-) -> None:
-    frame.status = NarrationImageFrameStatus.GENERATING.value
-    frame.error_message = None
-    db.commit()
+) -> bytes:
+    if not frame.parent_frame_id:
+        raise RuntimeError("Image-to-image frame requires a parent frame")
 
+    parent = _get_frame(db, frame.parent_frame_id)
+    if not parent:
+        raise RuntimeError(f"Parent frame not found: {frame.parent_frame_id}")
+    if not parent.output_image_path:
+        raise RuntimeError(
+            "Parent frame has no output_image_path for image-to-image reference"
+        )
+
+    parent_path = Path(parent.output_image_path)
+    if not parent_path.exists():
+        raise RuntimeError(f"Parent image file missing: {parent_path}")
+    return parent_path.read_bytes()
+
+
+def _active_image_provider(db) -> str:
+    cfg = ConfigManager(db).get_config("image_generation")
+    return cfg.get("provider") or "invokeai"
+
+
+def _generate_with_invokeai(db, frame: NarrationImageFrame):
     client = build_invokeai_client(db)
     if frame.mode == NarrationImageGenerationMode.TEXT_TO_IMAGE.value:
         result = asyncio.run(
@@ -101,6 +125,90 @@ def _generate_frame_image(
         )
     else:
         raise RuntimeError(f"Unsupported frame mode: {frame.mode}")
+    frame.invokeai_generated_image_name = result.image_name
+    return result
+
+
+def _generate_with_flux2_klein(db, frame: NarrationImageFrame):
+    client = build_flux2_klein_client(db)
+    if frame.mode == NarrationImageGenerationMode.TEXT_TO_IMAGE.value:
+        result = asyncio.run(
+            client.generate_text_to_image(
+                prompt=frame.prompt,
+                width=frame.width,
+                height=frame.height,
+                num_steps=frame.num_steps,
+                cfg_scale=frame.cfg_scale,
+                seed=frame.seed,
+            )
+        )
+    elif frame.mode == NarrationImageGenerationMode.IMAGE_TO_IMAGE.value:
+        ref_bytes = _resolve_reference_image_bytes(db, frame)
+        result = asyncio.run(
+            client.generate_with_reference_bytes(
+                prompt=frame.prompt,
+                reference_bytes=ref_bytes,
+                width=frame.width,
+                height=frame.height,
+                num_steps=frame.num_steps,
+                cfg_scale=frame.cfg_scale,
+                seed=frame.seed,
+            )
+        )
+    else:
+        raise RuntimeError(f"Unsupported frame mode: {frame.mode}")
+    frame.invokeai_reference_image_name = None
+    frame.invokeai_generated_image_name = None
+    return result
+
+
+def _generate_with_openai_image(db, frame: NarrationImageFrame):
+    client = build_openai_image_client(db)
+    if frame.mode == NarrationImageGenerationMode.TEXT_TO_IMAGE.value:
+        result = asyncio.run(
+            client.generate_text_to_image(
+                prompt=frame.prompt,
+                width=frame.width,
+                height=frame.height,
+                seed=frame.seed,
+            )
+        )
+    elif frame.mode == NarrationImageGenerationMode.IMAGE_TO_IMAGE.value:
+        ref_bytes = _resolve_reference_image_bytes(db, frame)
+        result = asyncio.run(
+            client.generate_with_reference_bytes(
+                prompt=frame.prompt,
+                reference_bytes=ref_bytes,
+                width=frame.width,
+                height=frame.height,
+                seed=frame.seed,
+            )
+        )
+    else:
+        raise RuntimeError(f"Unsupported frame mode: {frame.mode}")
+    frame.invokeai_reference_image_name = None
+    frame.invokeai_generated_image_name = None
+    return result
+
+
+def _generate_frame_image(
+    db,
+    series: NarrationImageSeries,
+    frame: NarrationImageFrame,
+) -> None:
+    frame.status = NarrationImageFrameStatus.GENERATING.value
+    frame.error_message = None
+    db.commit()
+
+    provider = _active_image_provider(db)
+    if provider == "flux2_klein":
+        result = _generate_with_flux2_klein(db, frame)
+    elif provider == "openai_image":
+        result = _generate_with_openai_image(db, frame)
+    elif provider == "invokeai":
+        result = _generate_with_invokeai(db, frame)
+    else:
+        raise RuntimeError(f"Unknown image provider: {provider}")
 
     output_dir = ensure_media_dir(
         settings.media_dir,
@@ -113,7 +221,7 @@ def _generate_frame_image(
     output_path = output_dir / f"{frame.step_order:03d}_{frame.id}.png"
     output_path.write_bytes(result.image_bytes)
 
-    frame.invokeai_generated_image_name = result.image_name
+    frame.provider = provider
     frame.actual_seed = result.seed
     frame.output_image_path = str(output_path)
     frame.status = NarrationImageFrameStatus.COMPLETED.value

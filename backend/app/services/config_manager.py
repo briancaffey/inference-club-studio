@@ -189,10 +189,24 @@ class ConfigManager:
                 "url": settings.magpie_url,
             },
             "stt": {
-                "url": settings.stt_url,
+                "provider": "openai",
+                "base_url": settings.stt_url,
+                "model": "Qwen/Qwen3-ASR-1.7B",
+                "api_key": None,
+                "language": None,
             },
-            "qwen_vl": {
-                "url": settings.qwen_vl_url,
+            "flux2_klein": {
+                "url": settings.flux2_klein_url,
+                "model": settings.flux2_klein_model,
+                "api_key": settings.flux2_klein_api_key or None,
+            },
+            "openai_image": {
+                "base_url": settings.openai_image_base_url,
+                "model": settings.openai_image_model,
+                "api_key": settings.openai_image_api_key or None,
+            },
+            "image_generation": {
+                "provider": settings.image_provider,
             },
         }
 

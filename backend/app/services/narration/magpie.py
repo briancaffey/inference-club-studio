@@ -6,12 +6,36 @@ import wave
 
 import httpx
 
+from app.config import settings
+from app.database import SessionLocal
+from app.services.config_manager import ConfigManager
+
 logger = logging.getLogger(__name__)
 
-MAGPIE_URL = os.environ.get("MAGPIE_URL", "http://192.168.6.3:9000")
 DEFAULT_VOICE = os.environ.get("MAGPIE_VOICE", "Magpie-Multilingual.EN-US.Mia.Happy")
 DEFAULT_LANGUAGE = "en-US"
 DEFAULT_SAMPLE_RATE = 22050
+
+
+def _load_magpie_config() -> dict:
+    db = SessionLocal()
+    try:
+        return ConfigManager(db).get_config("magpie") or {}
+    finally:
+        db.close()
+
+
+def _magpie_base_url(cfg: dict | None = None) -> str:
+    cfg = cfg if cfg is not None else _load_magpie_config()
+    return (cfg.get("url") or settings.magpie_url).rstrip("/")
+
+
+def _magpie_timeout(cfg: dict | None = None, default: float = 60.0) -> float:
+    cfg = cfg if cfg is not None else _load_magpie_config()
+    try:
+        return float(cfg.get("timeout", default))
+    except (TypeError, ValueError):
+        return default
 
 
 def get_wav_duration(filepath: str) -> float:
@@ -24,8 +48,9 @@ def get_wav_duration(filepath: str) -> float:
 
 async def list_voices() -> list[str]:
     """List available Magpie voices."""
-    base_url = MAGPIE_URL.rstrip("/")
-    timeout = httpx.Timeout(timeout=30.0)
+    cfg = _load_magpie_config()
+    base_url = _magpie_base_url(cfg)
+    timeout = httpx.Timeout(timeout=_magpie_timeout(cfg, default=30.0))
 
     async with httpx.AsyncClient(timeout=timeout) as client:
         resp = await client.get(f"{base_url}/v1/audio/list_voices")
@@ -55,14 +80,15 @@ async def generate(text: str, output_path: str, voice: str | None = None) -> str
     Raises:
         RuntimeError: If generation fails.
     """
-    base_url = MAGPIE_URL.rstrip("/")
+    cfg = _load_magpie_config()
+    base_url = _magpie_base_url(cfg)
     voice = voice or DEFAULT_VOICE
 
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
 
     logger.info(f"Magpie generating: {text[:80]}... (voice={voice})")
 
-    timeout = httpx.Timeout(timeout=60.0)
+    timeout = httpx.Timeout(timeout=_magpie_timeout(cfg, default=60.0))
 
     async with httpx.AsyncClient(timeout=timeout) as client:
         resp = await client.post(

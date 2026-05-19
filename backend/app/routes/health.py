@@ -10,8 +10,9 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.services.client_factory import (
     build_comfyui_client,
+    build_flux2_klein_client,
     build_invokeai_client,
-    build_qwen_vl_client,
+    build_openai_image_client,
     build_studio_voice_client,
 )
 from app.services.config_manager import ConfigManager
@@ -76,13 +77,20 @@ async def services_health_check(db: Session = Depends(get_db)):
 
     invokeai_client = build_invokeai_client(db)
     comfyui_client = build_comfyui_client(db)
-    qwen_vl_client = build_qwen_vl_client(db)
     studio_voice_client = build_studio_voice_client(db)
+    flux2_klein_client = build_flux2_klein_client(db)
+    openai_image_client = build_openai_image_client(db)
 
     llm_base_url = llm_cfg.get("base_url", "")
     dia_url = dia_cfg.get("url", "")
     magpie_url = magpie_cfg.get("url", "")
-    stt_url = stt_cfg.get("url", "")
+
+    stt_provider = (stt_cfg.get("provider") or "nemotron").lower()
+    stt_url = stt_cfg.get("base_url", "")
+    if stt_provider == "openai":
+        stt_paths = ("/models", "/audio/transcriptions", "/")
+    else:
+        stt_paths = ("/health", "/transcribe", "/")
 
     services: list[tuple[str, str, str, ServiceCheck]] = [
         (
@@ -102,16 +110,22 @@ async def services_health_check(db: Session = Depends(get_db)):
             partial(_check_client_health, invokeai_client.check_health),
         ),
         (
+            "flux2_klein",
+            "Flux 2 Klein NIM",
+            flux2_klein_client.url,
+            partial(_check_client_health, flux2_klein_client.check_health),
+        ),
+        (
+            "openai_image",
+            "OpenAI Image API",
+            openai_image_client.url,
+            partial(_check_client_health, openai_image_client.check_health),
+        ),
+        (
             "comfyui",
             "ComfyUI",
             comfyui_client.url,
             partial(_check_client_health, comfyui_client.check_health),
-        ),
-        (
-            "qwen_vl",
-            "Qwen VL",
-            qwen_vl_client.url,
-            partial(_check_client_health, qwen_vl_client.check_health),
         ),
         (
             "dia",
@@ -133,11 +147,7 @@ async def services_health_check(db: Session = Depends(get_db)):
             "stt",
             "Speech-to-Text",
             stt_url,
-            partial(
-                _check_http_reachable,
-                stt_url,
-                ("/health", "/transcribe", "/"),
-            ),
+            partial(_check_http_reachable, stt_url, stt_paths),
         ),
         (
             "studio_voice",

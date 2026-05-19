@@ -125,7 +125,7 @@ async function handleSubmit() {
           <div class="flex items-center justify-between">
             <label class="flex items-center gap-2 text-sm font-medium">
               <WandSparkles class="h-4 w-4" />
-              AI Prompt Helper (Qwen3-VL)
+              AI Prompt Helper
             </label>
             <Button
               type="button"

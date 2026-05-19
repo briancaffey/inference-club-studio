@@ -15,18 +15,36 @@ import time
 
 import httpx
 
+from app.config import settings
+from app.database import SessionLocal
+from app.services.config_manager import ConfigManager
+
 logger = logging.getLogger(__name__)
 
-OPENAI_BASE_URL = os.environ.get("OPENAI_BASE_URL", "http://192.168.6.19:8002/v1")
-OPENAI_MODEL = os.environ.get(
-    "OPENAI_MODEL", "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16"
-)
-OPENAI_API_KEY = (
-    os.environ.get("OPENAI_API_KEY") or os.environ.get("GROQ_API_KEY") or "not-needed"
-)
 LLM_MAX_TOKENS = int(os.environ.get("LLM_MAX_TOKENS", "4096"))
 LLM_TEMPERATURE = float(os.environ.get("LLM_TEMPERATURE", "0.3"))
 LLM_CONCURRENCY = int(os.environ.get("LLM_CONCURRENCY", "8"))
+
+
+def _load_llm_settings() -> dict:
+    """Snapshot the active llm config (base_url/model/api_key) from the DB.
+
+    Falls back to env-driven defaults via ConfigManager.
+    """
+    db = SessionLocal()
+    try:
+        cfg = ConfigManager(db).get_config("llm") or {}
+    finally:
+        db.close()
+    base_url = (cfg.get("base_url") or settings.openai_base_url).rstrip("/")
+    model = cfg.get("model") or settings.openai_model
+    api_key = (
+        cfg.get("api_key")
+        or settings.openai_api_key
+        or settings.groq_api_key
+        or "not-needed"
+    )
+    return {"base_url": base_url, "model": model, "api_key": api_key}
 
 # Prompt for cleaning a single chunk (not the whole article)
 CHUNK_PROMPT = """\
@@ -126,12 +144,14 @@ def _groq_reasoning_options(base_url: str) -> dict:
     }
 
 
-async def _call_llm_chunk(client: httpx.AsyncClient, chunk: str) -> str:
+async def _call_llm_chunk(
+    client: httpx.AsyncClient, chunk: str, llm_settings: dict
+) -> str:
     """Send a single chunk to the LLM for TTS cleanup. Returns raw content."""
-    base_url = OPENAI_BASE_URL.rstrip("/")
+    base_url = llm_settings["base_url"]
 
     payload = {
-        "model": OPENAI_MODEL,
+        "model": llm_settings["model"],
         "messages": [
             {"role": "system", "content": CHUNK_PROMPT},
             {"role": "user", "content": chunk},
@@ -144,7 +164,7 @@ async def _call_llm_chunk(client: httpx.AsyncClient, chunk: str) -> str:
     resp = await client.post(
         f"{base_url}/chat/completions",
         json=payload,
-        headers={"Authorization": f"Bearer {OPENAI_API_KEY}"},
+        headers={"Authorization": f"Bearer {llm_settings['api_key']}"},
     )
 
     if resp.status_code != 200:
@@ -180,9 +200,10 @@ async def process_single_chunk(text: str) -> list[str]:
 
     Used for retrying failed chunks from the frontend.
     """
+    llm_settings = _load_llm_settings()
     timeout = httpx.Timeout(connect=10.0, read=120.0, write=10.0, pool=10.0)
     async with httpx.AsyncClient(timeout=timeout) as client:
-        content = await _call_llm_chunk(client, text)
+        content = await _call_llm_chunk(client, text, llm_settings)
     return _parse_segments(content)
 
 
@@ -194,6 +215,7 @@ async def split_article_for_tts(article_text: str) -> list[str]:
     chunks = split_into_chunks(article_text)
     logger.info(f"Split article ({len(article_text)} chars) into {len(chunks)} chunks")
 
+    llm_settings = _load_llm_settings()
     semaphore = asyncio.Semaphore(LLM_CONCURRENCY)
     timeout = httpx.Timeout(connect=10.0, read=120.0, write=10.0, pool=10.0)
 
@@ -201,7 +223,7 @@ async def split_article_for_tts(article_text: str) -> list[str]:
 
         async def process(chunk: str) -> list[str]:
             async with semaphore:
-                content = await _call_llm_chunk(client, chunk)
+                content = await _call_llm_chunk(client, chunk, llm_settings)
                 return _parse_segments(content)
 
         results = await asyncio.gather(
@@ -247,6 +269,7 @@ async def split_article_for_tts_streaming(article_text: str):
         "total": len(chunks),
     }
 
+    llm_settings = _load_llm_settings()
     semaphore = asyncio.Semaphore(LLM_CONCURRENCY)
     timeout = httpx.Timeout(connect=10.0, read=120.0, write=10.0, pool=10.0)
     # Queue for chunk tasks to report results back to the generator
@@ -260,7 +283,7 @@ async def split_article_for_tts_streaming(article_text: str):
             async def process_chunk(i: int, chunk: str):
                 async with semaphore:
                     try:
-                        content = await _call_llm_chunk(client, chunk)
+                        content = await _call_llm_chunk(client, chunk, llm_settings)
                         segments = _parse_segments(content)
                         await queue.put({"index": i, "segments": segments})
                     except Exception as e:
@@ -310,10 +333,10 @@ async def split_article_for_tts_streaming(article_text: str):
             await asyncio.gather(*tasks)
 
     except httpx.ConnectError:
-        base_url = OPENAI_BASE_URL.rstrip("/")
         yield {
             "phase": "error",
-            "detail": f"Could not connect to LLM at {base_url}. Is the service running?",
+            "detail": f"Could not connect to LLM at {llm_settings['base_url']}. "
+            "Is the service running?",
         }
         return
     except Exception as e:

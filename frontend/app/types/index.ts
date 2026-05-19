@@ -337,7 +337,9 @@ export type ServiceConfigKey =
   | 'dia'
   | 'magpie'
   | 'stt'
-  | 'qwen_vl'
+  | 'flux2_klein'
+  | 'openai_image'
+  | 'image_generation'
 
 export interface ServiceConfigField {
   type: 'string' | 'number' | 'boolean'

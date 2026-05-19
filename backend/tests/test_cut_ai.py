@@ -91,7 +91,7 @@ def test_create_flux_prompt_draft(mock_execute, client, db):
         prompt_input={"style": "anime", "content": "person on street"},
         prompt_text="input prompt",
         response_text="final flux prompt",
-        model_name="Qwen/Qwen3-VL-4B-Instruct",
+        model_name="qwen3.5-27b",
         prompt_tokens=123,
         completion_tokens=88,
         temperature=0.4,

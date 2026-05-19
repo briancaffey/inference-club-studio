@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, computed } from 'vue'
-import { X, Save, Clock, AlertCircle } from 'lucide-vue-next'
+import { Save, Clock, AlertCircle, Loader2 } from 'lucide-vue-next'
 
 interface Props {
   open: boolean
@@ -17,7 +17,6 @@ const emit = defineEmits<{
 
 const { updateConfig, getAuditHistory } = useServiceConfigs()
 
-const loading = ref(false)
 const saving = ref(false)
 const error = ref<string | null>(null)
 const auditLoading = ref(false)
@@ -26,14 +25,53 @@ const activeTab = ref<'config' | 'audit'>('config')
 
 const formValues = ref<Record<string, unknown>>({})
 
+const llmModels = ref<string[]>([])
+const llmModelsLoading = ref(false)
+const llmModelsError = ref<string | null>(null)
+const lastFetchedBaseUrl = ref<string>('')
+
 const isOpen = computed({
   get: () => props.open,
   set: (value) => emit('update:open', value),
 })
 
+type EnumOption = { value: string; label: string }
+const ENUM_FIELD_OPTIONS: Record<string, Record<string, EnumOption[]>> = {
+  image_generation: {
+    provider: [
+      { value: 'invokeai', label: 'InvokeAI' },
+      { value: 'flux2_klein', label: 'Flux 2 Klein NIM' },
+      { value: 'openai_image', label: 'OpenAI Image API (local server)' },
+    ],
+  },
+  stt: {
+    provider: [
+      { value: 'nemotron', label: 'NVIDIA Nemotron (custom /transcribe)' },
+      { value: 'openai', label: 'OpenAI-compatible (/v1/audio/transcriptions)' },
+    ],
+  },
+}
+
+function getEnumOptions(field: string): EnumOption[] | undefined {
+  return ENUM_FIELD_OPTIONS[props.serviceKey]?.[field]
+}
+
+const shouldFetchModels = computed(() => {
+  if (props.serviceKey === 'llm') return true
+  if (props.serviceKey === 'stt' && formValues.value.provider === 'openai') return true
+  return false
+})
+
 onMounted(() => {
   if (props.config) {
     formValues.value = { ...props.config }
+  }
+  if (
+    shouldFetchModels.value &&
+    typeof formValues.value.base_url === 'string' &&
+    formValues.value.base_url
+  ) {
+    void fetchLlmModels(formValues.value.base_url as string)
   }
 })
 
@@ -42,10 +80,101 @@ watch(
   (newConfig) => {
     if (newConfig) {
       formValues.value = { ...newConfig }
+      if (
+        shouldFetchModels.value &&
+        typeof newConfig.base_url === 'string' &&
+        newConfig.base_url
+      ) {
+        void fetchLlmModels(newConfig.base_url as string)
+      }
     }
   },
   { deep: true },
 )
+
+watch(
+  () => formValues.value.provider,
+  (newProvider) => {
+    if (props.serviceKey !== 'stt') return
+    if (newProvider === 'openai') {
+      const baseUrl = formValues.value.base_url
+      if (typeof baseUrl === 'string' && baseUrl) {
+        void fetchLlmModels(baseUrl)
+      }
+    } else {
+      llmModels.value = []
+      llmModelsError.value = null
+      lastFetchedBaseUrl.value = ''
+    }
+  },
+)
+
+function normalizeBaseUrl(url: string): string {
+  return url.trim().replace(/\/+$/, '')
+}
+
+function buildModelsUrl(baseUrl: string): string {
+  const stripped = baseUrl.replace(/\/v1$/, '')
+  return `${stripped}/v1/models`
+}
+
+async function fetchLlmModels(baseUrl: string) {
+  const normalized = normalizeBaseUrl(baseUrl)
+  if (!normalized) {
+    llmModels.value = []
+    llmModelsError.value = null
+    lastFetchedBaseUrl.value = ''
+    return
+  }
+  llmModelsLoading.value = true
+  llmModelsError.value = null
+  try {
+    const headers: Record<string, string> = {}
+    const apiKey = formValues.value.api_key
+    if (typeof apiKey === 'string' && apiKey) {
+      headers.Authorization = `Bearer ${apiKey}`
+    }
+    const response = await $fetch<any>(buildModelsUrl(normalized), { headers })
+    const data: any[] = Array.isArray(response?.data)
+      ? response.data
+      : Array.isArray(response)
+        ? response
+        : []
+    const ids = data
+      .map((m) => (typeof m === 'string' ? m : m?.id))
+      .filter((id): id is string => typeof id === 'string' && !!id)
+    llmModels.value = ids
+    lastFetchedBaseUrl.value = normalized
+
+    const currentModel = formValues.value.model
+    if (ids.length === 1) {
+      formValues.value.model = ids[0]
+    } else if (
+      ids.length > 1 &&
+      typeof currentModel === 'string' &&
+      currentModel &&
+      !ids.includes(currentModel)
+    ) {
+      formValues.value.model = ''
+    }
+  } catch (e: any) {
+    llmModels.value = []
+    llmModelsError.value =
+      e?.data?.detail || e?.message || 'Failed to fetch models from /v1/models'
+  } finally {
+    llmModelsLoading.value = false
+  }
+}
+
+function handleBaseUrlBlur() {
+  if (!shouldFetchModels.value) return
+  const baseUrl = formValues.value.base_url
+  if (typeof baseUrl !== 'string') return
+  const normalized = normalizeBaseUrl(baseUrl)
+  if (normalized && normalized !== lastFetchedBaseUrl.value) {
+    void fetchLlmModels(normalized)
+  }
+}
 
 async function handleSave() {
   saving.value = true
@@ -169,6 +298,78 @@ function isBooleanField(field: string): boolean {
                 v-model="formValues[field]"
                 type="checkbox"
               />
+
+              <template v-else-if="shouldFetchModels && field === 'base_url'">
+                <Input
+                  :id="`config-${field}`"
+                  v-model="formValues[field]"
+                  type="text"
+                  :placeholder="getFieldPlaceholder(field)"
+                  @blur="handleBaseUrlBlur"
+                />
+                <div class="flex items-center gap-2 text-xs text-muted-foreground">
+                  <Loader2 v-if="llmModelsLoading" class="h-3 w-3 animate-spin" />
+                  <span v-if="llmModelsLoading">Fetching models from /v1/models…</span>
+                  <span v-else-if="llmModelsError" class="text-red-600 dark:text-red-400">
+                    {{ llmModelsError }}
+                  </span>
+                  <span v-else-if="llmModels.length > 0">
+                    {{ llmModels.length }} model{{ llmModels.length === 1 ? '' : 's' }} available
+                  </span>
+                </div>
+              </template>
+
+              <template v-else-if="shouldFetchModels && field === 'model'">
+                <Select
+                  v-if="llmModels.length > 0"
+                  :model-value="(formValues[field] as string) || undefined"
+                  @update:model-value="formValues[field] = $event"
+                >
+                  <SelectTrigger :id="`config-${field}`" class="w-full">
+                    <SelectValue placeholder="Select a model" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem
+                      v-for="modelId in llmModels"
+                      :key="modelId"
+                      :value="modelId"
+                    >
+                      {{ modelId }}
+                    </SelectItem>
+                  </SelectContent>
+                </Select>
+                <Input
+                  v-else
+                  :id="`config-${field}`"
+                  v-model="formValues[field]"
+                  type="text"
+                  :placeholder="
+                    llmModelsLoading
+                      ? 'Loading models…'
+                      : 'Enter base_url above to load models'
+                  "
+                  :disabled="llmModelsLoading"
+                />
+              </template>
+
+              <Select
+                v-else-if="getEnumOptions(field)"
+                :model-value="(formValues[field] as string) || getEnumOptions(field)![0].value"
+                @update:model-value="formValues[field] = $event"
+              >
+                <SelectTrigger :id="`config-${field}`" class="w-full">
+                  <SelectValue placeholder="Select an option" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem
+                    v-for="opt in getEnumOptions(field)"
+                    :key="opt.value"
+                    :value="opt.value"
+                  >
+                    {{ opt.label }}
+                  </SelectItem>
+                </SelectContent>
+              </Select>
 
               <Input
                 v-else

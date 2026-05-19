@@ -91,7 +91,9 @@ def test_api_list_all_configs(client, db):
         "dia",
         "magpie",
         "stt",
-        "qwen_vl",
+        "flux2_klein",
+        "openai_image",
+        "image_generation",
     }
     assert "schema_fields" in body["invokeai"]
     assert "url" in body["invokeai"]["schema_fields"]

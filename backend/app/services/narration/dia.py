@@ -9,12 +9,36 @@ from pathlib import Path
 
 import httpx
 
+from app.config import settings
+from app.database import SessionLocal
+from app.services.config_manager import ConfigManager
+
 logger = logging.getLogger(__name__)
 
-DIA_URL = os.environ.get("DIA_URL", "http://192.168.5.253:7860")
 _sample_dir = Path(__file__).resolve().parent / "sample"
 REFERENCE_AUDIO = os.environ.get("REFERENCE_AUDIO", str(_sample_dir / "Alice.wav"))
 REFERENCE_TEXT_FILE = os.environ.get("REFERENCE_TEXT", str(_sample_dir / "text.txt"))
+
+
+def _load_dia_config() -> dict:
+    db = SessionLocal()
+    try:
+        return ConfigManager(db).get_config("dia") or {}
+    finally:
+        db.close()
+
+
+def _dia_base_url(cfg: dict | None = None) -> str:
+    cfg = cfg if cfg is not None else _load_dia_config()
+    return (cfg.get("url") or settings.dia_url).rstrip("/")
+
+
+def _dia_timeout(cfg: dict | None = None, default: float = 300.0) -> float:
+    cfg = cfg if cfg is not None else _load_dia_config()
+    try:
+        return float(cfg.get("timeout", default))
+    except (TypeError, ValueError):
+        return default
 
 # Generation parameters
 MAX_NEW_TOKENS = 3072
@@ -81,7 +105,8 @@ async def generate(
     Raises:
         RuntimeError: If generation fails at any step.
     """
-    base_url = DIA_URL.rstrip("/")
+    cfg = _load_dia_config()
+    base_url = _dia_base_url(cfg)
     ref_audio = reference_audio_path or REFERENCE_AUDIO
     reference_text = (
         reference_text_override
@@ -95,7 +120,7 @@ async def generate(
 
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
 
-    timeout = httpx.Timeout(timeout=300.0)
+    timeout = httpx.Timeout(timeout=_dia_timeout(cfg))
 
     async with httpx.AsyncClient(timeout=timeout) as client:
         # 1. Upload reference audio

@@ -15,7 +15,7 @@ from app.models.cut_ai import (
     CutAIStatus,
     PromptDraft,
 )
-from app.services.client_factory import build_qwen_vl_client
+from app.services.client_factory import build_llm_client
 from app.services.qwen_prompts import (
     CLIP_OVERVIEW_PROFILE,
     FIRST_FRAME_PROFILE,
@@ -96,7 +96,7 @@ def queue_runs_for_cut(
     types = analysis_types or DEFAULT_ANALYSIS_TYPES
     state = get_or_create_ai_state(db, cut.id)
     runs: list[CutAIRun] = []
-    model_name = build_qwen_vl_client(db).model
+    model_name = build_llm_client(db).model
 
     for analysis_type in types:
         if analysis_type not in VALID_ANALYSIS_TYPES:
@@ -201,7 +201,7 @@ def execute_clip_overview_run(
     _run_started(state, run)
     db.commit()
 
-    client = build_qwen_vl_client(db)
+    client = build_llm_client(db)
     result = asyncio.run(
         client.analyze_video(
             video_path=cut.file_path,
@@ -239,7 +239,7 @@ def execute_first_frame_run(
     state.first_frame_path = frame_path
     db.commit()
 
-    client = build_qwen_vl_client(db)
+    client = build_llm_client(db)
     result = asyncio.run(
         client.analyze_image(
             image_path=frame_path,
@@ -294,14 +294,14 @@ def execute_flux_prompt_run(
         prompt_text=prompt_text,
         temperature=profile.temperature,
         max_tokens=profile.max_tokens,
-        model_name=build_qwen_vl_client(db).model,
+        model_name=build_llm_client(db).model,
     )
     run.status = CutAIStatus.RUNNING.value
     run.started_at = utc_now()
     db.commit()
 
     try:
-        client = build_qwen_vl_client(db)
+        client = build_llm_client(db)
         result = asyncio.run(
             client.generate_text(
                 prompt=prompt_text,
